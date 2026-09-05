@@ -10,7 +10,7 @@ suppressPackageStartupMessages({
 se_source_dir <- function(dir) {
   files <- c("hashchain.R", "crypto.R", "identifiers.R", "detect_r.R",
              "profile.R", "deidentify.R", "keystore.R", "project.R",
-             "sdc.R", "engine_py.R")
+             "checkpoint.R", "sdc.R", "engine_py.R")
   for (f in files) {
     fp <- file.path(dir, f)
     if (file.exists(fp)) sys.source(fp, envir = globalenv())
@@ -29,3 +29,6 @@ se_source_dir(file.path(.se_app_dir, "R"))
 
 options(se.bundle_root = normalizePath(file.path(.se_app_dir, ".."),
                                        mustWork = FALSE))
+# where parallel workers re-source the core from (see checkpoint.R)
+options(se.app_r_dir = normalizePath(file.path(.se_app_dir, "R"),
+                                     mustWork = FALSE))

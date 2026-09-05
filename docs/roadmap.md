@@ -26,12 +26,19 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   `R/engine_py.R`); wire an explicit "Enable NER" probe (never auto-provision).
 - ⬜ Optional local **Ollama** LLM pass for ambiguous free text (off by default).
 
-## Phase 3 — Policy + de-identify engine ✅ core / ⬜ scale
+## Phase 3 — Policy + de-identify engine ✅
 - ✅ Per-column policy → actions: pseudonymize / **FPE (optional)** / generalize (date→year,
   age→band, geo→sector) / redact / **free-text targeted redaction** (`app/R/deidentify.R`).
 - ✅ Crosswalk captured for reversible actions; authorised re-identification proven.
-- ⬜ Chunked checkpoints + parallel workers (`future`/`mirai`) + mid-job **resume** for large
-  files (`work/` scaffolding present; engine to be added).
+- ✅ Chunked checkpoints + parallel workers + mid-job **resume** for large files
+  (`app/R/checkpoint.R`): row-sliced processing writes each slice to `work/<file>/` with a
+  `progress.json` ledger, so a killed/power-lost run — or the drive **moved to another machine** —
+  resumes from the first unfinished slice. Slices are independent, so they fan out over
+  `future`/`future.apply` workers when asked (clean sequential fallback). CSV without embedded
+  newlines is read one slice at a time (bounded memory); quoted-newline CSV and XLSX fall back to
+  a single correct read. Verified headless: chunked == whole-table, resume-after-kill,
+  resume-after-folder-move, parallel == sequential, embedded-newline & XLSX paths. Wired into the
+  De-identify tab (rows/chunk, parallel workers, live progress, resume status).
 
 ## Phase 4 — Reviewer workflow + audit ✅ core
 - ✅ Role gating (de-identifier vs reviewer), side-by-side original↔de-identified review,

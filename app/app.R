@@ -146,10 +146,19 @@ ui <- page_navbar(
     card(card_header("Apply the policy"),
       radioButtons("out_format", "Output format", c("CSV"="csv","XLSX"="xlsx"),
                    inline = TRUE),
+      layout_columns(col_widths = c(4, 4, 4),
+        numericInput("chunk_size", "Rows per chunk", value = 50000,
+                     min = 100, step = 1000),
+        checkboxInput("parallel", "Run chunks in parallel", value = FALSE),
+        numericInput("workers", "Parallel workers", value = 2, min = 1,
+                     step = 1)),
       actionButton("btn_deid", "Run de-identification", class = "btn-primary"),
       div(class="small text-muted mt-2",
-          "Requires the De-identifier role. Writes to outputs/, records the ",
-          "encrypted crosswalk, manifest and audit entry."),
+          "Requires the De-identifier role. Large files are processed in ",
+          "checkpointed chunks under work/, so a killed run — or the drive ",
+          "moved to another machine — resumes where it stopped. Writes to ",
+          "outputs/, records the encrypted crosswalk, manifest and audit entry."),
+      verbatimTextOutput("deid_resume"),
       verbatimTextOutput("deid_summary"))
   ),
 
@@ -372,23 +381,66 @@ server <- function(input, output, session) {
                        type = "error"); return()
     }
     policy <- if (length(rv$proj$policy$columns)) rv$proj$policy else build_policy()
-    withProgress(message = "De-identifying...", {
-      key <- se_resolve_key(rv$proj$hash_scope, rv$proj)
-      rv$deid <- se_deidentify_table(rv$df, policy, key)
-      p <- se_project_paths(rv$proj$dir)
-      base <- tools::file_path_sans_ext(basename(rv$path %||% "table"))
-      out <- file.path(p$outputs, paste0(base, ".deid.", input$out_format))
-      if (input$out_format == "xlsx") writexl::write_xlsx(rv$deid$data, out)
-      else utils::write.csv(rv$deid$data, out, row.names = FALSE)
-      blob <- se_crosswalk_encrypt(rv$deid$crosswalk, key)
+    p <- se_project_paths(rv$proj$dir)
+    key <- se_resolve_key(rv$proj$hash_scope, rv$proj)
+
+    # The engine reads from disk so it can chunk/resume. Use the loaded file if
+    # it is a real path; otherwise snapshot the in-memory table under work/.
+    src <- rv$path
+    if (is.null(src) || !file.exists(src)) {
+      src <- file.path(p$work, "table.csv")
+      data.table::fwrite(rv$df, src)
+    }
+    par_arg <- if (isTRUE(input$parallel)) max(1L, as.integer(input$workers %||% 2L)) else FALSE
+
+    withProgress(message = "De-identifying...", value = 0, {
+      res <- se_deidentify_file(
+        rv$proj, src, policy, key, out_format = input$out_format,
+        chunk_size = as.integer(input$chunk_size %||% 50000L),
+        parallel = par_arg,
+        app_r_dir = getOption("se.app_r_dir"),
+        progress_cb = function(done, total)
+          setProgress(value = if (total > 0) done / total else 1,
+                      detail = sprintf("chunk %d / %d", done, total)))
+      # load the finished output back for Review + SDC
+      deid_data <- if (input$out_format == "xlsx")
+        as.data.frame(readxl::read_excel(res$output, col_types = "text"),
+                      stringsAsFactors = FALSE)
+      else as.data.frame(data.table::fread(res$output, colClasses = "character",
+                                           na.strings = NULL), stringsAsFactors = FALSE)
+      rv$deid <- list(data = deid_data, crosswalk = res$crosswalk,
+                      summary = res$summary, resumed = res$resumed,
+                      n_chunks = res$n_chunks, mode = res$mode)
+
+      blob <- se_crosswalk_encrypt(res$crosswalk, key)
       saveRDS(blob, p$crosswalk)
       se_manifest_write(rv$proj)
       rv$proj$stage <- "deidentified"; rv$proj <- se_project_save(rv$proj)
       se_audit_append(p$audit, "deidentify", input$actor,
-                      list(output = basename(out), crosswalk_rows = nrow(rv$deid$crosswalk),
-                           out_sha256 = substr(se_sha256_file(out),1,16)))
+                      list(output = basename(res$output),
+                           chunks = res$n_chunks, resumed = res$resumed,
+                           mode = res$mode, parallel = !isFALSE(par_arg),
+                           crosswalk_rows = nrow(res$crosswalk),
+                           out_sha256 = substr(res$out_sha %||% se_sha256_file(res$output), 1, 16)))
     })
-    showNotification("De-identification complete. See Review output.", type = "message")
+    showNotification(sprintf("De-identification complete (%d chunks%s). See Review output.",
+                             rv$deid$n_chunks, if (isTRUE(rv$deid$resumed)) ", resumed" else ""),
+                     type = "message")
+  })
+
+  output$deid_resume <- renderText({
+    req(rv$proj)
+    src <- rv$path
+    if (is.null(src) || !file.exists(src)) src <- file.path(se_project_paths(rv$proj$dir)$work, "table.csv")
+    if (!file.exists(src)) return("")
+    st <- se_deidentify_status(rv$proj, src, as.integer(input$chunk_size %||% 50000L))
+    if (!isTRUE(st$exists)) return("No prior run for this file — a fresh run will start from chunk 1.")
+    if (identical(st$stage, "complete"))
+      sprintf("Previous run complete: %s (%d chunks). Re-running resumes/rebuilds from checkpoints.",
+              st$output %||% "", st$done)
+    else
+      sprintf("Resumable: %d / %s chunks already done — a run will continue from there.",
+              st$done, as.character(st$total))
   })
 
   output$deid_summary <- renderText({

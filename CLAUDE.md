@@ -42,6 +42,7 @@ app/
     detect_r.R     deterministic detectors + validators (NRIC/FIN checksum, phone, email, ...)
     profile.R      column profiling + misplaced-PII / outlier detection
     deidentify.R   transform engine (pseudonymize / fpe / generalize / redact / freetext)
+    checkpoint.R   chunked/parallel/resumable de-id for large files (survives drive switch)
     sdc.R          statistical disclosure control (opt-in): k-anon, l-div, SUDA, risk, DCR, gate
     keystore.R     global vs project key material
     project.R      portable project folder, manifest (SHA-256), input registration

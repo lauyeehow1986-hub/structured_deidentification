@@ -119,10 +119,22 @@ ui <- page_navbar(
     card(card_header("Run detection"),
       div(actionButton("btn_detect", "Scan for PII + misplaced values",
                        class = "btn-primary"),
+          actionButton("btn_enable_ner", "Enable offline NER",
+                       class = "btn-outline-secondary ms-2"),
           span(textOutput("py_status", inline = TRUE), class = "text-muted ms-3")),
-      div(class="small text-muted mt-2",
-          "Rules + validators (NRIC checksum, phone, email, dates), column ",
-          "profiling for out-of-place values, and free-text NER when available.")),
+      div(class = "mt-2",
+        checkboxInput("use_ner",
+          "Use offline NER (Presidio/spaCy) on free text", value = FALSE),
+        checkboxInput("use_llm",
+          "Use a local LLM (Ollama) for ambiguous free text — off by default",
+          value = FALSE)),
+      div(class="small text-muted mt-1",
+          "Rules + validators (NRIC checksum, phone, email, dates) and column ",
+          "profiling always run with zero Python. Offline NER and the local LLM ",
+          "run only against the bundled, on-disk engine — the LLM pass ",
+          "contacts an Ollama service on THIS machine only, and nothing is ever ",
+          "sent over the network. Click Enable offline NER once per session to ",
+          "probe the bundled interpreter (never auto-provisioned).")),
     layout_columns(col_widths = c(12),
       card(card_header("Misplaced / outlier values (review these first)"),
         DTOutput("outliers")),
@@ -221,7 +233,19 @@ server <- function(input, output, session) {
                        findings = NULL, profile = NULL, suggestion = NULL,
                        userkey = NULL)
 
-  output$py_status <- renderText(se_py_status_text())
+  # Re-render after an explicit probe so the operator sees the new status.
+  output$py_status <- renderText({ input$btn_enable_ner; se_py_status_text() })
+
+  # Explicit "Enable NER" — actively probes the BUNDLED interpreter only.
+  # Never auto-provisions (se_py_probe no-ops unless a real interpreter exists).
+  observeEvent(input$btn_enable_ner, {
+    st <- se_py_probe()
+    ready <- isTRUE(st$presidio) && isTRUE(st$spacy)
+    showNotification(
+      if (ready) "Offline NER ready (Presidio + spaCy)."
+      else "No bundled NER engine found — staying in rules-only mode. See docs/ner_packaging.md.",
+      type = if (ready) "message" else "warning")
+  })
 
   # ---- project ----
   output$proj_status <- renderUI({
@@ -292,21 +316,16 @@ server <- function(input, output, session) {
     withProgress(message = "Scanning...", {
       rv$suggestion <- se_suggest_mapping(rv$df)
       rv$profile <- rv$suggestion$profile
-      # free-text findings on likely note columns
-      ftcols <- names(rv$df)[vapply(names(rv$df), function(cn)
-        grepl("note|remark|comment|text|desc|free", tolower(cn)), logical(1))]
-      ff <- list()
-      for (cn in ftcols) {
-        for (i in seq_len(nrow(rv$df))) {
-          sp <- se_scan_text(rv$df[[cn]][i])
-          if (nrow(sp)) ff[[length(ff)+1L]] <- cbind(row=i, column=cn, sp[,c("match","type","confidence")])
-        }
-      }
-      rv$findings <- if (length(ff)) do.call(rbind, ff) else NULL
+      # free-text findings on likely note columns: rules always, NER/LLM opt-in
+      ff <- se_detect_freetext(rv$df,
+              use_ner = isTRUE(input$use_ner), use_llm = isTRUE(input$use_llm))
+      rv$findings <- if (nrow(ff)) ff else NULL
     })
     if (!is.null(rv$proj))
       se_audit_append(se_project_paths(rv$proj$dir)$audit, "detect", input$actor,
-                      list(outliers = nrow(rv$profile$outliers)))
+                      list(outliers = nrow(rv$profile$outliers),
+                           freetext = if (is.null(rv$findings)) 0L else nrow(rv$findings),
+                           ner = isTRUE(input$use_ner), llm = isTRUE(input$use_llm)))
   })
 
   output$outliers <- renderDT({

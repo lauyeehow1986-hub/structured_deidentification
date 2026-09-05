@@ -17,14 +17,35 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Tamper-evident hash-chained audit log (`app/R/hashchain.R`) — verified detects edits.
 - ✅ Import CSV/XLSX with SHA-256 registration into the manifest.
 
-## Phase 2 — Detection + review ✅ core / 🚧 NER packaging
+## Phase 2 — Detection + review ✅
 - ✅ Deterministic detectors + validators incl. real **NRIC/FIN checksum** (`app/R/detect_r.R`).
 - ✅ Column profiling + **misplaced-PII / outlier detection** (`app/R/profile.R`) — proven to
   catch an NRIC in a procedure-date and a serial-number column.
 - ✅ Review surfaces: outlier table + free-text findings + auto column→identifier suggestion.
-- 🚧 Bundle Python + Presidio/spaCy model for offline NER (contract ready: `python/detect_ner.py`,
-  `R/engine_py.R`); wire an explicit "Enable NER" probe (never auto-provision).
-- ⬜ Optional local **Ollama** LLM pass for ambiguous free text (off by default).
+- ✅ **Explicit "Enable offline NER" probe, never auto-provisioned, run out-of-process.** The
+  Detect tab has an Enable-NER button that probes the **bundled** interpreter (`se_py_probe`), plus
+  opt-in checkboxes for NER and the local LLM. The engine runs as a **subprocess** of
+  `bin/python/python.exe` (`app/python/run_engine.py`, JSON in/out) — *not* reticulate, because on
+  Windows R's OpenSSL and a standalone Python's OpenSSL cannot share one process. Startup stays
+  passive (file-existence only); the app never calls `py_available(initialize=TRUE)` or triggers
+  uv/pip. Free-text detection merges deterministic rules (always) + Presidio/spaCy NER + the LLM
+  into one findings table (`se_detect_freetext` / `se_dedup_findings`), each span tagged by detector
+  (`rule:*` / `ner:presidio` / `llm:ollama`). All engines **fail closed to empty** when absent.
+  Two air-gap hardenings baked in: the `ner`/`probe` runner modes **hard-disable outbound sockets**,
+  and Presidio uses a **spaCy-NER-only registry** so its `tldextract`-backed email recognizer can't
+  fetch the public-suffix list over the network. Bundling recipe: [docs/ner_packaging.md](ner_packaging.md).
+- ✅ Optional local **Ollama** LLM pass for ambiguous free text, **off by default**
+  (`app/python/detect_llm.py`, `se_llm_scan` / `se_ollama_config`). The only socket in the whole
+  system, loopback-only to a bundled Ollama the operator chose to run — no remote endpoint, no
+  fallback. Findings are labelled hints (confidence ~0.6), never ground truth.
+- ✅ **Verified end-to-end on a connected staging box** with a real bundle: a relocatable
+  python-build-standalone CPython 3.12 under `bin/python/` + `presidio-analyzer` + `spacy` +
+  `en_core_web_lg`. `se_py_probe()` reports ready and the R→subprocess→Presidio path finds names
+  and locations that the rules miss (e.g. "John Tan", "Sarah Lim", "Singapore") merged alongside the
+  rule hits. Also verified headless: merge/dedup, rules-only equivalence, fail-closed when the
+  interpreter is absent, the socket guard actually blocks outbound, and `testServer` for the full
+  Detect-tab wiring (rules-only forced path *and* the live NER path). The bundle itself is
+  `.gitignore`d (`/bin/`, `/models/`) — code + docs are committed, the interpreter is sneakernetted.
 
 ## Phase 3 — Policy + de-identify engine ✅
 - ✅ Per-column policy → actions: pseudonymize / **FPE (optional)** / generalize (date→year,

@@ -15,9 +15,14 @@ controller remains responsible for confirming adequacy of de-identification befo
 ## Design constraints (non-negotiable)
 - **Air-gapped, no-install:** must copy onto a locked-down Windows box and run by unzip +
   double-click. Everything is pure-R over pre-bundled packages; heavy detection (NER/OCR/LLM/PDF)
-  runs in a **bundled** Python via reticulate. **No network calls, ever.** In particular, never
-  call `reticulate::py_available(initialize=TRUE)` or anything that triggers uv/pip provisioning —
-  see `app/R/engine_py.R`, which probes passively by checking for a bundled interpreter on disk.
+  runs in a **bundled** Python driven **out-of-process** — a subprocess of `bin/python/python.exe`
+  running `app/python/run_engine.py` (JSON in/out), NOT reticulate: on Windows R's OpenSSL and a
+  standalone Python's OpenSSL cannot share one process (the `no OPENSSL_Applink` crash). **No
+  network calls, ever.** `app/R/engine_py.R` probes passively (checks for a bundled interpreter on
+  disk) and only runs the subprocess on an explicit "Enable NER" click; the `ner`/`probe` runner
+  modes hard-disable outbound sockets, and Presidio is restricted to a spaCy-NER-only registry so
+  its `tldextract`-backed email recognizer can't fetch the public-suffix list. Never call
+  `reticulate::py_available(initialize=TRUE)` or anything that triggers uv/pip provisioning.
 - **Portable projects:** all project state lives in one self-contained folder on the data drive
   (see `app/R/project.R`), so a job can be unplugged and resumed on another machine.
 - **Two key scopes everywhere:** `global` (link the same person across projects) and `project`

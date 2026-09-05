@@ -1,61 +1,76 @@
-# CLAUDE.md — Slice-AR (Android)
+# CLAUDE.md — Structured De-identification System
 
 ## What this is
-Android reimplementation of the iOS app "Slice-AR": an interactive tool for exploring 3D
-medical volume data (MRI/DICOM). Users define cross-section planes by moving the device, in
-both an **AR mode** and a **standard 3D mode**. Educational/research tool — **not for
-diagnosis or clinical decision-making** (state this in-app, matching the original's disclaimer).
+An **admin-operated R Shiny tool to de-identify structured data** (CSV, XLSX, tables) and,
+in later phases, documents (PDF, XML including Philips iECG/SierraECG and GE MUSE ECG XML).
+It removes/transforms the **15 SingHealth identifiers**, detects PII that has been *misplaced*
+(e.g. an NRIC typed into a procedure-date or serial-number column) or buried in free text, and
+enforces a **two-person workflow** (de-identifier + reviewer) with a **tamper-evident audit
+trail, SHA-256 manifests, and digital-signature sign-off**.
 
-Clean-room reimplementation built from the concept only. Do **NOT** copy the original app's
-code, assets, bundle identifier, or branding.
+Educational/research governance tool — **not for clinical or diagnostic use**. The data
+controller remains responsible for confirming adequacy of de-identification before release.
+**Never commit real patient data or DICOM/PHI** — only synthetic samples (`samples/`).
+
+## Design constraints (non-negotiable)
+- **Air-gapped, no-install:** must copy onto a locked-down Windows box and run by unzip +
+  double-click. Everything is pure-R over pre-bundled packages; heavy detection (NER/OCR/LLM/PDF)
+  runs in a **bundled** Python via reticulate. **No network calls, ever.** In particular, never
+  call `reticulate::py_available(initialize=TRUE)` or anything that triggers uv/pip provisioning —
+  see `app/R/engine_py.R`, which probes passively by checking for a bundled interpreter on disk.
+- **Portable projects:** all project state lives in one self-contained folder on the data drive
+  (see `app/R/project.R`), so a job can be unplugged and resumed on another machine.
+- **Two key scopes everywhere:** `global` (link the same person across projects) and `project`
+  (isolated). Re-identification is possible only via the AEAD-encrypted crosswalk + the key.
 
 ## Tech stack
-- **Unity 6.4 (6000.4.10f1)**, Universal Render Pipeline (URP), Android build target (IL2CPP, ARM64).
-- **AR Foundation + ARCore XR Plugin** (AR mode, device pose → clipping plane). Added via the
-  Package Manager / MCP after first open so versions resolve for this editor.
-- Rendering core: **`com.mlavik1.easyvolumerenderer`** (mlavik1/UnityVolumeRendering, MIT) — a
-  git-package dependency in `Packages/manifest.json` (supports Built-in/URP/HDRP; we use URP).
-  If we need to modify its shaders for mobile/AR, embed it under `Packages/` as a local fork.
-- MCP bridge: **`com.anklebreaker.unity-mcp`** (same bridge as gamev2) — lets this assistant
-  drive the editor once the project is open.
-- **Unity Localization** (EN / IT / ES / DE / JA / FR).
-- Min Android API: **24+**. AR mode needs an ARCore-supported device; 3D + motion modes must
-  work without ARCore.
+- **R 4.5.x + Shiny + bslib + DT**; `openssl` + `sodium` for crypto; `sdcMicro` for disclosure
+  control; `data.table`, `future`/`mirai` for parallel; `readxl`/`writexl`, `xml2`, `pdftools`,
+  `tesseract`; `reticulate` for the optional Python NER/OCR engine.
+- Reuses patterns from the author's **shinyEncrypt** (keyed hash/FPE/AEAD/signatures),
+  **flexsynth** (linkage-risk metrics), **dicom_deid/AndyFishing** (portable R+reticulate).
 
-## Project layout (target)
+## Project layout
 ```
-Assets/Scripts/            App code (slicing, AR session, UI, import, annotations)
-Assets/Scenes/             Main, ARMode, ThreeDMode
-Assets/StreamingAssets/    Bundled sample volume datasets
-Assets/Localization/       String tables per language
-Packages/manifest.json     Package deps (URP, Localization, MCP bridge, volume renderer)
-docs/                      Design notes, roadmap (see docs/roadmap.md)
+app/
+  app.R            Shiny UI + server (9 tabs)
+  global.R         loads the core in order
+  R/
+    crypto.R       keyed HMAC pseudonyms, Feistel FPE, AEAD crosswalk, ed25519 signatures
+    hashchain.R    tamper-evident append-only audit log
+    identifiers.R  the 15-identifier catalogue + default actions (editable per project)
+    detect_r.R     deterministic detectors + validators (NRIC/FIN checksum, phone, email, ...)
+    profile.R      column profiling + misplaced-PII / outlier detection
+    deidentify.R   transform engine (pseudonymize / fpe / generalize / redact / freetext)
+    sdc.R          statistical disclosure control (opt-in): k-anon, l-div, SUDA, risk, DCR, gate
+    keystore.R     global vs project key material
+    project.R      portable project folder, manifest (SHA-256), input registration
+    engine_py.R    passive, air-gap-safe bridge to the bundled Python NER
+  python/
+    detect_ner.py  Presidio + spaCy NER (bundled model; no download)
+samples/           synthetic test data + generator (make_sample.R) — NO real data
+docs/roadmap.md    phased plan and status
+run.ps1 / run.bat  portable launcher
 ```
 
 ## Conventions
-- C#, PascalCase types/methods, camelCase locals; one MonoBehaviour per file.
-- Keep the volume-rendering package **untouched**; extend via new components in
-  `Assets/Scripts/` so upstream updates stay mergeable. Only fork it into `Packages/` if a
-  shader edit for mobile/AR is genuinely required.
-- **Never commit patient data or real DICOM studies** — only public/synthetic sample volumes.
-- No network calls except optional, explicit, user-initiated dataset downloads.
+- C#-style not applicable; **R** with `se_` prefix on all core functions, `snake_case`.
+- Keep the core (`app/R/*.R`) pure and independently testable — every module has a headless test
+  path (see the self-tests run during development). Prefer `testServer` for reactive logic.
+- FPE is **optional**, not the default: IDs default to a keyed pseudonym token; choose FPE per
+  field only when the downstream system needs the original shape preserved.
+- Every SDC step is **opt-in**; export can be gated on k / max-risk thresholds.
 
-## Build & run
-- Open in Unity Hub with the matching Unity 6 LTS editor.
-- Platform → Android; scripting backend IL2CPP, target ARM64; add ARCore XR Plugin.
-- Build APK/AAB via **File > Build Settings**, or the Unity MCP build tools.
-- AR features must be smoke-tested on **physical hardware** (the emulator can't run ARCore).
+## Build & run (dev)
+- `& "C:\Program Files\R\R-4.5.2\bin\Rscript.exe" -e "shiny::runApp('app', port=7788)"`
+- Regenerate sample data: `Rscript samples/make_sample.R`
 
-## Feature parity target (from the iOS app)
-Direct volume rendering · device-motion cross-section plane · AR + 3D modes · DICOM support ·
-normal/gradient shading · annotations · color LUTs (transfer functions) · 6-language UI ·
-import image sequences + small DICOM datasets from device storage · editable voxel size ·
-pre-loaded sample datasets.
+## Status / roadmap
+Phases 0–1 complete and core proven end-to-end (crypto, detection, profiling, de-identify,
+crosswalk re-id, manifest, hash-chained audit). See [docs/roadmap.md](docs/roadmap.md) for the
+phase-by-phase plan (Python NER packaging, PDF/XML/ECG, full SDC UI, signed handoff, batch,
+portable packaging).
 
-## Roadmap
-Phased delivery (Phase 0 scaffold → Phase 8 polish). See [docs/roadmap.md](docs/roadmap.md).
-
-## Key references
-- Rendering core: https://github.com/mlavik1/UnityVolumeRendering (MIT)
-- AR Foundation: https://docs.unity3d.com/Packages/com.unity.xr.arfoundation@6.5/
-- Original app (feature reference only): https://apps.apple.com/gb/app/slice-ar/id6746819867
+## Repo note
+The local clone's `origin` currently points at `R_slice_ar.git` (this folder was seeded from an
+unrelated project). Confirm/point the remote at `structured_deidentification` before pushing.

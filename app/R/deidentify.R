@@ -1,0 +1,140 @@
+# deidentify.R — apply a de-identification policy to a tabular data.frame.
+#
+# Consumes a policy (column -> {identifier, action, options}) plus the resolved
+# scope key, and returns:
+#   data       the de-identified data.frame
+#   crosswalk  data.frame(column, original, token) for reversible actions only
+#              (pseudonymize / fpe), to be AEAD-encrypted for authorised re-id
+#   summary    per-column action + counts, for the certificate/report
+#
+# Free-text columns use targeted redaction: only the spans the detectors flag
+# are replaced (with a typed tag), the surrounding text is preserved.
+
+# --- generalisation helpers --------------------------------------------------
+
+se_generalize_date <- function(x, method = "year") {
+  d <- suppressWarnings(as.Date(x, tryFormats = c("%d/%m/%Y","%Y-%m-%d","%m/%d/%Y","%d-%m-%Y")))
+  out <- rep(NA_character_, length(x))
+  ok <- !is.na(d)
+  if (method == "year") out[ok] <- format(d[ok], "%Y")
+  else if (method == "year_month") out[ok] <- format(d[ok], "%Y-%m")
+  else out[ok] <- format(d[ok], "%Y")
+  # values that didn't parse: leave a tag so nothing leaks silently
+  out[!ok & !is.na(x)] <- "[DATE]"
+  out
+}
+
+se_generalize_age <- function(x, width = 5L, cap = 90L) {
+  a <- suppressWarnings(as.integer(x))
+  out <- rep(NA_character_, length(x))
+  ok <- !is.na(a)
+  capped <- ok & a >= cap
+  band <- ok & a < cap
+  lo <- (a[band] %/% width) * width
+  out[band] <- sprintf("%d-%d", lo, lo + width - 1L)
+  out[capped] <- paste0(cap, "+")
+  out
+}
+
+se_generalize_geo <- function(x, method = "region") {
+  # SG postal sector = first 2 digits of a 6-digit code -> coarse district.
+  vapply(x, function(v) {
+    if (is.na(v)) return(NA_character_)
+    m <- regmatches(v, regexpr("[0-9]{6}", v))
+    if (length(m) == 1 && nzchar(m)) return(paste0("SECTOR-", substr(m, 1, 2)))
+    "[GEO]"
+  }, character(1), USE.NAMES = FALSE)
+}
+
+# --- free-text targeted redaction -------------------------------------------
+
+#' Replace only detected PII spans in a text with typed tags, keep the rest.
+se_redact_freetext_value <- function(text, detectors = se_detectors(),
+                                     min_conf = 0.5) {
+  if (is.na(text) || !nzchar(text)) return(text)
+  sp <- se_scan_text(text, detectors)
+  sp <- sp[sp$confidence >= min_conf, , drop = FALSE]
+  if (!nrow(sp)) return(text)
+  # apply from rightmost span to leftmost so offsets stay valid
+  sp <- sp[order(-sp$start), , drop = FALSE]
+  out <- text
+  for (i in seq_len(nrow(sp))) {
+    tag <- paste0("[", toupper(sp$type[i]), "]")
+    out <- paste0(substr(out, 1, sp$start[i] - 1L), tag,
+                  substr(out, sp$end[i] + 1L, nchar(out)))
+  }
+  out
+}
+
+# --- main engine -------------------------------------------------------------
+
+#' @param df       source data.frame (character columns recommended).
+#' @param policy   list: columns = named list col -> list(identifier, action,
+#'                 options=list(...)); freetext_columns = character().
+#' @param key      resolved scope key (raw/character).
+#' @param detectors detector registry (for free-text redaction).
+se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
+  cols <- policy$columns %||% list()
+  crosswalk <- list()
+  summ <- list()
+  out <- df
+
+  for (cn in names(df)) {
+    spec <- cols[[cn]]
+    action <- spec$action %||% "keep"
+    ident  <- spec$identifier %||% NA_character_
+    opts   <- spec$options %||% list()
+    ndef   <- se_identifier(ident)
+    salt   <- ndef$salt %||% cn
+    orig   <- as.character(df[[cn]])
+
+    new <- switch(action,
+      "pseudonymize" = {
+        prefix <- toupper(substr(gsub("[^A-Za-z]", "", ident %||% cn), 1, 3))
+        if (!nzchar(prefix) || prefix == "NA") prefix <- "ID"
+        se_pseudonymize(orig, key, prefix = prefix, salt = salt)
+      },
+      "fpe" = {
+        mode <- opts$fpe_mode %||% ndef$fpe_mode %||% "alnum_upper"
+        vapply(orig, function(v) {
+          if (is.na(v)) return(NA_character_)
+          enc <- se_fpe(v, key, mode = mode, tweak = salt)
+          if (is.na(enc)) se_pseudonymize(v, key, prefix="ID", salt=salt) else enc
+        }, character(1), USE.NAMES = FALSE)
+      },
+      "generalize" = {
+        meth <- opts$generalize %||% ndef$generalize %||% "year"
+        if (meth %in% c("year","year_month")) se_generalize_date(orig, meth)
+        else if (meth == "age_band")          se_generalize_age(orig, opts$width %||% 5L)
+        else if (meth == "region")            se_generalize_geo(orig, "region")
+        else orig
+      },
+      "redact"          = ifelse(is.na(orig), NA_character_, "[REDACTED]"),
+      "redact_freetext" = vapply(orig, se_redact_freetext_value, character(1),
+                                 detectors = detectors, USE.NAMES = FALSE),
+      "keep"            = orig,
+      orig
+    )
+    out[[cn]] <- new
+
+    # record reversible mappings for crosswalk
+    if (action %in% c("pseudonymize","fpe")) {
+      keep <- !is.na(orig) & nzchar(trimws(orig))
+      if (any(keep)) {
+        uniq <- !duplicated(orig[keep])
+        crosswalk[[cn]] <- data.frame(
+          column = cn, original = orig[keep][uniq], token = new[keep][uniq],
+          stringsAsFactors = FALSE)
+      }
+    }
+    summ[[cn]] <- list(column = cn, identifier = ident, action = action,
+                       n_changed = sum(orig != new | (is.na(orig) != is.na(new)),
+                                       na.rm = TRUE))
+  }
+
+  cw <- if (length(crosswalk)) do.call(rbind, crosswalk) else
+        data.frame(column=character(0), original=character(0), token=character(0),
+                   stringsAsFactors=FALSE)
+  rownames(cw) <- NULL
+  list(data = out, crosswalk = cw, summary = summ)
+}

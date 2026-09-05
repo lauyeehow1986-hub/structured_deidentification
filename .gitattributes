@@ -1,2 +1,0 @@
-# Raw volume datasets are binary — never apply text/EOL conversion
-*.raw binary

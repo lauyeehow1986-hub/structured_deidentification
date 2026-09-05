@@ -1,0 +1,550 @@
+# app.R — Structured De-identification System (Shiny UI).
+# Launch from the bundle root:  shiny::runApp("app")
+# or via the portable launcher (run.bat / run.ps1).
+
+local({
+  cand <- c("global.R", file.path("app", "global.R"))
+  hit <- cand[file.exists(cand)][1]
+  if (is.na(hit)) stop("cannot locate global.R")
+  source(hit, local = FALSE)
+})
+
+# ---- small UI helpers -------------------------------------------------------
+
+se_read_table <- function(path, sheet = NULL) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("xlsx", "xls")) {
+    df <- as.data.frame(readxl::read_excel(path, sheet = sheet %||% 1,
+                                           col_types = "text"))
+  } else {
+    df <- utils::read.csv(path, stringsAsFactors = FALSE, colClasses = "character",
+                          check.names = FALSE, na.strings = c("NA"))
+  }
+  df
+}
+
+# heuristic column -> identifier suggestion from name + content
+se_suggest_mapping <- function(df) {
+  prof <- se_profile_table(df)
+  name_hint <- function(cn) {
+    x <- tolower(cn)
+    if (grepl("name|alias|initial", x)) return("name")
+    if (grepl("nric|\\bfin\\b|passport|birth\\s*cert|national.?id", x)) return("national_id")
+    if (grepl("mrn|medical.?record|record.?no|hosp.?no|patient.?id", x)) return("mrn")
+    if (grepl("case|visit|episode|admission|encounter|billing", x)) return("case_visit")
+    if (grepl("fax", x)) return("fax")
+    if (grepl("phone|tel|mobile|hp\\b|contact|pager", x)) return("phone")
+    if (grepl("email|e-?mail", x)) return("email")
+    if (grepl("postal|zip", x)) return("postal_code")
+    if (grepl("address|addr|street|block|unit|residen", x)) return("address")
+    if (grepl("death|deceas|expir|demise", x)) return("date_of_death")
+    if (grepl("dob|birth|\\bbday\\b", x)) return("dob")
+    if (grepl("serial|device|\\bsn\\b|implant", x)) return("device")
+    if (grepl("biometric|fingerprint|iris|voiceprint", x)) return("biometric")
+    if (grepl("photo|image|face|picture|img", x)) return("photo")
+    if (grepl("note|remark|comment|free|text|desc|diagnos", x)) return("other_id")
+    NA_character_
+  }
+  out <- list()
+  for (cn in names(df)) {
+    ident <- name_hint(cn)
+    if (is.na(ident)) {
+      dt <- prof$per_column[[cn]]$dominant_type
+      ident <- switch(dt %||% "", nric="national_id", email="email", phone="phone",
+                      postal="postal_code", date="dob", mrn="mrn", "keep")
+      if (identical(ident, "keep")) ident <- NA_character_
+    }
+    out[[cn]] <- ident
+  }
+  list(mapping = out, profile = prof)
+}
+
+# ---- UI ---------------------------------------------------------------------
+
+ui <- page_navbar(
+  title = "Structured De-identification",
+  theme = bs_theme(version = 5, preset = "flatly"),
+  id = "nav",
+  sidebar = sidebar(
+    width = 300,
+    selectInput("role", "Your role",
+                c("De-identifier" = "deidentifier", "Reviewer" = "reviewer")),
+    textInput("actor", "Your name / ID", value = Sys.getenv("USERNAME", "operator")),
+    hr(),
+    uiOutput("proj_status"),
+    hr(),
+    div(class = "small text-muted",
+        "Educational / research de-identification tool. Not for clinical or ",
+        "diagnostic use. Verify every output before release.")
+  ),
+
+  # 1. PROJECT
+  nav_panel("1 · Project", icon = icon("folder-open"),
+    layout_columns(col_widths = c(6, 6),
+      card(card_header("Open or create a project folder"),
+        textInput("proj_dir", "Project folder (on the data drive)",
+                  placeholder = "e.g. D:/deid_projects/StudyA", width = "100%"),
+        textInput("proj_name", "Project name", value = "StudyA"),
+        radioButtons("hash_scope", "Default hashing scope",
+          c("Project-specific key (isolated)" = "project",
+            "Global key (link across projects)" = "global")),
+        div(actionButton("btn_create", "Create", class = "btn-primary"),
+            actionButton("btn_open", "Open existing"))),
+      card(card_header("What lives in the project folder"),
+        tags$ul(
+          tags$li(tags$b("project.json"), " — settings, identifier policy, state"),
+          tags$li(tags$b("inputs/ · outputs/"), " — source and de-identified files"),
+          tags$li(tags$b("work/"), " — checkpoints for resume + parallel"),
+          tags$li(tags$b("crosswalk.enc"), " — encrypted re-identification map"),
+          tags$li(tags$b("manifest.json"), " — SHA-256 of every file"),
+          tags$li(tags$b("audit.log"), " — tamper-evident action log"),
+          tags$li(tags$b("signatures/ · certificate.json"), " — signed sign-off")),
+        div(class="small text-muted",
+            "The whole folder is portable: unplug the drive and resume on any ",
+            "machine running this tool."))
+    )
+  ),
+
+  # 2. IMPORT
+  nav_panel("2 · Import", icon = icon("file-import"),
+    card(card_header("Load a table (CSV / XLSX)"),
+      fileInput("file", NULL, accept = c(".csv", ".xlsx", ".xls"), width = "100%"),
+      uiOutput("sheet_ui"),
+      textOutput("import_info")),
+    card(card_header("Preview"), DTOutput("preview"))
+  ),
+
+  # 3. DETECT & REVIEW
+  nav_panel("3 · Detect", icon = icon("magnifying-glass"),
+    card(card_header("Run detection"),
+      div(actionButton("btn_detect", "Scan for PII + misplaced values",
+                       class = "btn-primary"),
+          span(textOutput("py_status", inline = TRUE), class = "text-muted ms-3")),
+      div(class="small text-muted mt-2",
+          "Rules + validators (NRIC checksum, phone, email, dates), column ",
+          "profiling for out-of-place values, and free-text NER when available.")),
+    layout_columns(col_widths = c(12),
+      card(card_header("Misplaced / outlier values (review these first)"),
+        DTOutput("outliers")),
+      card(card_header("Free-text PII found in notes-like columns"),
+        DTOutput("freetext_findings")))
+  ),
+
+  # 4. POLICY
+  nav_panel("4 · Policy", icon = icon("sliders"),
+    card(card_header("Per-column de-identification policy"),
+      div(actionButton("btn_autosuggest", "Auto-suggest mapping"),
+          actionButton("btn_save_policy", "Save policy", class = "btn-primary")),
+      div(class="small text-muted mt-2",
+          "Pick the identifier and action for each column. FPE is optional; ",
+          "the default for IDs is a keyed pseudonym token."),
+      uiOutput("policy_ui"))
+  ),
+
+  # 5. DE-IDENTIFY
+  nav_panel("5 · De-identify", icon = icon("user-secret"),
+    card(card_header("Apply the policy"),
+      radioButtons("out_format", "Output format", c("CSV"="csv","XLSX"="xlsx"),
+                   inline = TRUE),
+      actionButton("btn_deid", "Run de-identification", class = "btn-primary"),
+      div(class="small text-muted mt-2",
+          "Requires the De-identifier role. Writes to outputs/, records the ",
+          "encrypted crosswalk, manifest and audit entry."),
+      verbatimTextOutput("deid_summary"))
+  ),
+
+  # 6. REVIEW OUTPUT
+  nav_panel("6 · Review output", icon = icon("table-columns"),
+    card(card_header("Original vs de-identified (side by side)"),
+      uiOutput("review_controls"), DTOutput("review_table")),
+    card(card_header("Reviewer decision"),
+      div(actionButton("btn_approve", "Approve", class="btn-success"),
+          actionButton("btn_return", "Return to de-identifier", class="btn-warning")),
+      div(class="small text-muted mt-2", "Reviewer role only."))
+  ),
+
+  # 7. SDC
+  nav_panel("7 · Disclosure control", icon = icon("shield-halved"),
+    card(card_header("Statistical disclosure control (all optional)"),
+      uiOutput("sdc_quasi_ui"),
+      checkboxGroupInput("sdc_steps", "Measures to run",
+        c("k-anonymity" = "kanon", "l-diversity" = "ldiv",
+          "Sample uniques (SUDA-lite)" = "suda",
+          "Individual risk (sdcMicro)" = "risk",
+          "Linkage risk DCR vs original" = "dcr"),
+        selected = c("kanon")),
+      numericInput("sdc_k", "Target k", value = 5, min = 2, width = "150px"),
+      actionButton("btn_sdc", "Run selected measures", class = "btn-primary"),
+      verbatimTextOutput("sdc_out"))
+  ),
+
+  # 8. AUDIT
+  nav_panel("8 · Audit", icon = icon("clipboard-check"),
+    card(card_header("Audit log (hash-chained)"),
+      div(actionButton("btn_verify", "Verify chain integrity"),
+          span(textOutput("audit_status", inline = TRUE), class="ms-3")),
+      DTOutput("audit_table")),
+    card(card_header("File manifest (SHA-256)"), DTOutput("manifest_table"))
+  ),
+
+  # 9. SIGN-OFF & HANDOFF
+  nav_panel("9 · Sign-off", icon = icon("signature"),
+    layout_columns(col_widths = c(6,6),
+      card(card_header("Sign the current stage"),
+        p("Each person signs their stage with a per-user key. The public key ",
+          "travels in the bundle so the other machine can verify it."),
+        actionButton("btn_sign", "Sign as current role", class="btn-primary"),
+        verbatimTextOutput("sign_out")),
+      card(card_header("Handoff bundle"),
+        p("Export a signed project bundle for the reviewer on another machine; ",
+          "import theirs to continue."),
+        downloadButton("dl_bundle", "Export signed bundle (.zip)"),
+        fileInput("imp_bundle", "Import a bundle (.zip)", accept = ".zip"),
+        actionButton("btn_cert", "Generate de-identification certificate"),
+        verbatimTextOutput("cert_out")))
+  )
+)
+
+# ---- server -----------------------------------------------------------------
+
+server <- function(input, output, session) {
+  rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
+                       findings = NULL, profile = NULL, suggestion = NULL,
+                       userkey = NULL)
+
+  output$py_status <- renderText(se_py_status_text())
+
+  # ---- project ----
+  output$proj_status <- renderUI({
+    if (is.null(rv$proj)) return(div(class="text-muted", "No project open."))
+    p <- rv$proj
+    tagList(
+      div(tags$b("Project: "), p$name),
+      div(tags$b("Stage: "), p$stage),
+      div(tags$b("Scope: "), p$hash_scope),
+      div(class="small text-muted", p$dir))
+  })
+
+  observeEvent(input$btn_create, {
+    req(nzchar(input$proj_dir))
+    tryCatch({
+      rv$proj <- se_project_create(input$proj_dir, input$proj_name,
+                                   actor = input$actor, hash_scope = input$hash_scope)
+      showNotification("Project created.", type = "message")
+    }, error = function(e) showNotification(paste("Create failed:", conditionMessage(e)),
+                                            type = "error"))
+  })
+  observeEvent(input$btn_open, {
+    req(nzchar(input$proj_dir))
+    tryCatch({
+      rv$proj <- se_project_open(input$proj_dir)
+      showNotification("Project opened.", type = "message")
+    }, error = function(e) showNotification(paste("Open failed:", conditionMessage(e)),
+                                            type = "error"))
+  })
+
+  # ---- import ----
+  output$sheet_ui <- renderUI({
+    req(input$file)
+    if (tolower(tools::file_ext(input$file$name)) %in% c("xlsx","xls")) {
+      sheets <- tryCatch(readxl::excel_sheets(input$file$datapath), error=function(e) NULL)
+      if (!is.null(sheets)) selectInput("sheet", "Sheet", sheets)
+    }
+  })
+
+  observeEvent(input$file, {
+    req(input$file)
+    df <- tryCatch(se_read_table(input$file$datapath, input$sheet),
+                   error = function(e) { showNotification(conditionMessage(e), type="error"); NULL })
+    req(df)
+    rv$df <- df
+    rv$deid <- NULL
+    if (!is.null(rv$proj)) {
+      # register a copy under inputs/ using the original filename
+      dest <- file.path(se_project_paths(rv$proj$dir)$inputs, input$file$name)
+      file.copy(input$file$datapath, dest, overwrite = TRUE)
+      rv$proj <- se_register_input(rv$proj, dest, actor = input$actor)
+      rv$path <- dest
+    }
+  })
+
+  output$import_info <- renderText({
+    req(rv$df)
+    sha <- if (!is.null(rv$path)) substr(se_sha256_file(rv$path), 1, 16) else "(not registered)"
+    sprintf("%d rows x %d columns.  SHA-256: %s...", nrow(rv$df), ncol(rv$df), sha)
+  })
+  output$preview <- renderDT({
+    req(rv$df); datatable(head(rv$df, 200), options = list(scrollX = TRUE, pageLength = 10))
+  })
+
+  # ---- detect ----
+  observeEvent(input$btn_detect, {
+    req(rv$df)
+    withProgress(message = "Scanning...", {
+      rv$suggestion <- se_suggest_mapping(rv$df)
+      rv$profile <- rv$suggestion$profile
+      # free-text findings on likely note columns
+      ftcols <- names(rv$df)[vapply(names(rv$df), function(cn)
+        grepl("note|remark|comment|text|desc|free", tolower(cn)), logical(1))]
+      ff <- list()
+      for (cn in ftcols) {
+        for (i in seq_len(nrow(rv$df))) {
+          sp <- se_scan_text(rv$df[[cn]][i])
+          if (nrow(sp)) ff[[length(ff)+1L]] <- cbind(row=i, column=cn, sp[,c("match","type","confidence")])
+        }
+      }
+      rv$findings <- if (length(ff)) do.call(rbind, ff) else NULL
+    })
+    if (!is.null(rv$proj))
+      se_audit_append(se_project_paths(rv$proj$dir)$audit, "detect", input$actor,
+                      list(outliers = nrow(rv$profile$outliers)))
+  })
+
+  output$outliers <- renderDT({
+    req(rv$profile)
+    datatable(rv$profile$outliers, options = list(scrollX = TRUE, pageLength = 10),
+              rownames = FALSE) |>
+      formatStyle("severity", target = "row",
+                  backgroundColor = styleEqual(c("high","medium"),
+                                               c("#f8d7da", "#fff3cd")))
+  })
+  output$freetext_findings <- renderDT({
+    if (is.null(rv$findings)) return(datatable(data.frame(message="Run detection.")))
+    datatable(rv$findings, options = list(scrollX = TRUE, pageLength = 10), rownames = FALSE)
+  })
+
+  # ---- policy ----
+  observeEvent(input$btn_autosuggest, {
+    req(rv$df)
+    if (is.null(rv$suggestion)) rv$suggestion <- se_suggest_mapping(rv$df)
+    showNotification("Mapping suggested from names + content.", type = "message")
+  })
+
+  output$policy_ui <- renderUI({
+    req(rv$df)
+    idents <- se_default_identifiers()
+    ident_choices <- c("(none / keep)" = "keep",
+                       setNames(vapply(idents, `[[`, "", "id"),
+                                vapply(idents, `[[`, "", "label")))
+    sugg <- rv$suggestion$mapping %||% list()
+    rows <- lapply(names(rv$df), function(cn) {
+      sel_ident <- sugg[[cn]] %||% "keep"; if (is.na(sel_ident)) sel_ident <- "keep"
+      def_act <- if (sel_ident == "keep") "keep" else
+        (se_identifier(sel_ident)$default_action %||% "pseudonymize")
+      layout_columns(col_widths = c(4,4,4),
+        div(tags$b(cn), tags$br(),
+            span(class="small text-muted",
+                 paste0("shape: ", rv$profile$per_column[[cn]]$dominant_shape %||% "?"))),
+        selectInput(paste0("ident_", cn), NULL, ident_choices, selected = sel_ident),
+        selectInput(paste0("act_", cn), NULL, se_action_choices(), selected = def_act))
+    })
+    tagList(rows)
+  })
+
+  build_policy <- function() {
+    cols <- list()
+    ftcols <- character(0)
+    for (cn in names(rv$df)) {
+      ident <- input[[paste0("ident_", cn)]] %||% "keep"
+      act <- input[[paste0("act_", cn)]] %||% "keep"
+      if (act == "redact_freetext") ftcols <- c(ftcols, cn)
+      cols[[cn]] <- list(identifier = if (ident=="keep") NA else ident, action = act,
+                         options = list(fpe_mode = se_identifier(ident)$fpe_mode,
+                                        generalize = se_identifier(ident)$generalize))
+    }
+    list(columns = cols, freetext_columns = ftcols)
+  }
+
+  observeEvent(input$btn_save_policy, {
+    req(rv$df, rv$proj)
+    rv$proj$policy <- build_policy()
+    rv$proj <- se_project_save(rv$proj)
+    se_audit_append(se_project_paths(rv$proj$dir)$audit, "policy_save", input$actor,
+                    list(columns = length(rv$proj$policy$columns)))
+    showNotification("Policy saved to project.json.", type = "message")
+  })
+
+  # ---- de-identify ----
+  observeEvent(input$btn_deid, {
+    req(rv$df, rv$proj)
+    if (input$role != "deidentifier") {
+      showNotification("Only the De-identifier role can run de-identification.",
+                       type = "error"); return()
+    }
+    policy <- if (length(rv$proj$policy$columns)) rv$proj$policy else build_policy()
+    withProgress(message = "De-identifying...", {
+      key <- se_resolve_key(rv$proj$hash_scope, rv$proj)
+      rv$deid <- se_deidentify_table(rv$df, policy, key)
+      p <- se_project_paths(rv$proj$dir)
+      base <- tools::file_path_sans_ext(basename(rv$path %||% "table"))
+      out <- file.path(p$outputs, paste0(base, ".deid.", input$out_format))
+      if (input$out_format == "xlsx") writexl::write_xlsx(rv$deid$data, out)
+      else utils::write.csv(rv$deid$data, out, row.names = FALSE)
+      blob <- se_crosswalk_encrypt(rv$deid$crosswalk, key)
+      saveRDS(blob, p$crosswalk)
+      se_manifest_write(rv$proj)
+      rv$proj$stage <- "deidentified"; rv$proj <- se_project_save(rv$proj)
+      se_audit_append(p$audit, "deidentify", input$actor,
+                      list(output = basename(out), crosswalk_rows = nrow(rv$deid$crosswalk),
+                           out_sha256 = substr(se_sha256_file(out),1,16)))
+    })
+    showNotification("De-identification complete. See Review output.", type = "message")
+  })
+
+  output$deid_summary <- renderText({
+    if (is.null(rv$deid)) return("No de-identification run yet.")
+    s <- rv$deid$summary
+    lines <- vapply(s, function(x) sprintf("  %-16s %-16s changed=%d",
+                    x$column, x$action, x$n_changed), character(1))
+    paste0("Columns processed: ", length(s), "\n",
+           "Crosswalk rows (reversible): ", nrow(rv$deid$crosswalk), "\n\n",
+           paste(lines, collapse = "\n"))
+  })
+
+  # ---- review output ----
+  output$review_controls <- renderUI({
+    req(rv$deid)
+    selectInput("review_col", "Column", names(rv$df), width = "300px")
+  })
+  output$review_table <- renderDT({
+    req(rv$deid, input$review_col)
+    cn <- input$review_col
+    d <- data.frame(row = seq_len(nrow(rv$df)),
+                    original = rv$df[[cn]], de_identified = rv$deid$data[[cn]],
+                    stringsAsFactors = FALSE)
+    datatable(d, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
+  })
+  observeEvent(input$btn_approve, {
+    req(rv$proj)
+    if (input$role != "reviewer") { showNotification("Reviewer role required.", type="error"); return() }
+    rv$proj$stage <- "reviewed"; rv$proj <- se_project_save(rv$proj)
+    se_audit_append(se_project_paths(rv$proj$dir)$audit, "review_approve", input$actor, list())
+    showNotification("Approved.", type = "message")
+  })
+  observeEvent(input$btn_return, {
+    req(rv$proj)
+    se_audit_append(se_project_paths(rv$proj$dir)$audit, "review_return", input$actor, list())
+    showNotification("Returned to de-identifier.", type = "warning")
+  })
+
+  # ---- SDC ----
+  output$sdc_quasi_ui <- renderUI({
+    req(rv$df)
+    selectInput("sdc_quasi", "Quasi-identifier columns", names(rv$df),
+                multiple = TRUE, width = "100%")
+  })
+  observeEvent(input$btn_sdc, {
+    req(rv$df, input$sdc_quasi)
+    d <- if (!is.null(rv$deid)) rv$deid$data else rv$df
+    steps <- input$sdc_steps; out <- c()
+    if ("kanon" %in% steps) {
+      ka <- se_kanon(d, input$sdc_quasi, input$sdc_k)
+      out <- c(out, sprintf("k-anonymity: k_achieved=%d, %d records below k=%d (%.1f%%), uniques=%d",
+                            ka$k_achieved, ka$n_below_k, input$sdc_k, 100*ka$frac_below_k, ka$n_unique))
+    }
+    if ("ldiv" %in% steps) {
+      sc <- setdiff(names(d), input$sdc_quasi)[1]
+      ld <- se_ldiversity(d, input$sdc_quasi, sc)
+      if (!is.null(ld)) out <- c(out, sprintf("l-diversity on '%s': l_min=%d", ld$sensitive, ld$l_min))
+    }
+    if ("suda" %in% steps) {
+      su <- se_sample_uniques(d, input$sdc_quasi)
+      out <- c(out, sprintf("sample uniques: full=%.1f%%, worst subset=%.1f%%",
+                            100*su$frac_unique_full, 100*(su$max_subset_unique %||% NA)))
+    }
+    if ("risk" %in% steps) {
+      ir <- se_individual_risk(d, input$sdc_quasi)
+      if (!is.null(ir)) out <- c(out, sprintf("individual risk: mean=%.4f max=%.4f expected re-id=%.1f",
+                                              ir$risk_mean, ir$risk_max, ir$expected_reident))
+      else out <- c(out, "individual risk: sdcMicro unavailable/failed.")
+    }
+    if ("dcr" %in% steps && !is.null(rv$deid)) {
+      dc <- se_dcr(rv$deid$data, rv$df, input$sdc_quasi)
+      if (!is.null(dc)) out <- c(out, sprintf("DCR vs original: min=%.3f mean=%.3f exact-matches=%.1f%%",
+                                              dc$dcr_min, dc$dcr_mean, 100*dc$frac_zero))
+    }
+    gate <- se_sdc_gate(d, input$sdc_quasi, list(k = input$sdc_k, max_risk = 0.05))
+    out <- c(out, "", if (gate$pass) "EXPORT GATE: PASS" else
+             paste0("EXPORT GATE: BLOCKED\n  - ", paste(gate$reasons, collapse="\n  - ")))
+    output$sdc_out <- renderText(paste(out, collapse = "\n"))
+    if (!is.null(rv$proj))
+      se_audit_append(se_project_paths(rv$proj$dir)$audit, "sdc_run", input$actor,
+                      list(steps = steps, gate_pass = gate$pass))
+  })
+
+  # ---- audit ----
+  output$audit_table <- renderDT({
+    req(rv$proj)
+    input$btn_verify; input$btn_deid; input$btn_detect  # refresh triggers
+    a <- se_audit_read(se_project_paths(rv$proj$dir)$audit)
+    datatable(a, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
+  })
+  observeEvent(input$btn_verify, {
+    req(rv$proj)
+    v <- se_audit_verify(se_project_paths(rv$proj$dir)$audit)
+    output$audit_status <- renderText(
+      if (v$ok) sprintf("Chain OK (%d entries).", v$n)
+      else sprintf("TAMPER DETECTED at entry %d.", v$broken_at))
+  })
+  output$manifest_table <- renderDT({
+    req(rv$proj)
+    mp <- se_project_paths(rv$proj$dir)$manifest
+    if (!file.exists(mp)) return(datatable(data.frame(message="No manifest yet.")))
+    m <- jsonlite::fromJSON(mp)$entries
+    datatable(m, options = list(scrollX = TRUE), rownames = FALSE)
+  })
+
+  # ---- sign-off & handoff ----
+  observeEvent(input$btn_sign, {
+    req(rv$proj)
+    if (is.null(rv$userkey)) rv$userkey <- se_sig_keygen()
+    p <- se_project_paths(rv$proj$dir)
+    payload <- list(stage = rv$proj$stage, actor = input$actor, role = input$role,
+                    manifest_sha = if (file.exists(p$manifest)) se_sha256_file(p$manifest) else NA,
+                    when = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
+    sig <- se_sign(payload, rv$userkey$secret)
+    dir.create(p$signatures, showWarnings = FALSE, recursive = TRUE)
+    saveRDS(list(payload = payload, signature = sig, public = rv$userkey$public),
+            file.path(p$signatures, paste0(input$role, ".sig.rds")))
+    se_audit_append(p$audit, "signoff", input$actor, list(role = input$role, stage = rv$proj$stage))
+    output$sign_out <- renderText(paste0("Signed stage '", rv$proj$stage,
+                                         "' as ", input$actor, " (", input$role, ")."))
+  })
+
+  output$dl_bundle <- downloadHandler(
+    filename = function() paste0(rv$proj$name %||% "project", "_bundle.zip"),
+    content = function(file) {
+      req(rv$proj)
+      files <- list.files(rv$proj$dir, recursive = TRUE, full.names = TRUE)
+      zip::zip(file, files = basename(rv$proj$dir),
+               root = dirname(rv$proj$dir))
+    })
+
+  observeEvent(input$imp_bundle, {
+    req(input$imp_bundle, rv$proj)
+    tryCatch({
+      zip::unzip(input$imp_bundle$datapath, exdir = dirname(rv$proj$dir))
+      showNotification("Bundle imported. Re-open the project to continue.", type="message")
+    }, error = function(e) showNotification(conditionMessage(e), type="error"))
+  })
+
+  observeEvent(input$btn_cert, {
+    req(rv$proj)
+    p <- se_project_paths(rv$proj$dir)
+    cert <- list(
+      title = "De-identification Certificate",
+      project = rv$proj$name, generated = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+      hash_scope = rv$proj$hash_scope,
+      policy_columns = length(rv$proj$policy$columns %||% list()),
+      manifest_sha256 = if (file.exists(p$manifest)) se_sha256_file(p$manifest) else NA,
+      audit = se_audit_verify(p$audit),
+      frameworks = c("PDPA (Singapore)", "HIPAA Safe Harbor (reference)",
+                     "SingHealth / IRB governance"),
+      disclaimer = "Not for clinical or diagnostic use. The data controller is responsible for confirming adequacy of de-identification before release.")
+    jsonlite::write_json(cert, p$certificate, auto_unbox = TRUE, pretty = TRUE)
+    output$cert_out <- renderText(paste(readLines(p$certificate), collapse = "\n"))
+    se_audit_append(p$audit, "certificate", input$actor, list())
+  })
+}
+
+shinyApp(ui, server)

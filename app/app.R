@@ -402,15 +402,20 @@ server <- function(input, output, session) {
         progress_cb = function(done, total)
           setProgress(value = if (total > 0) done / total else 1,
                       detail = sprintf("chunk %d / %d", done, total)))
-      # load the finished output back for Review + SDC
-      deid_data <- if (input$out_format == "xlsx")
-        as.data.frame(readxl::read_excel(res$output, col_types = "text"),
-                      stringsAsFactors = FALSE)
-      else as.data.frame(data.table::fread(res$output, colClasses = "character",
-                                           na.strings = NULL), stringsAsFactors = FALSE)
-      rv$deid <- list(data = deid_data, crosswalk = res$crosswalk,
-                      summary = res$summary, resumed = res$resumed,
-                      n_chunks = res$n_chunks, mode = res$mode)
+      # Make Review + SDC memory-safe: only hold the whole output in memory when
+      # it is small; otherwise page (Review) / sample (SDC) it from disk via
+      # readers, so a huge finished output is never loaded in full.
+      inmem_max  <- getOption("se.deid_inmem_max", 200000L)
+      big        <- isTRUE(res$nrec > inmem_max)
+      out_reader <- se_open_table(res$output, format = input$out_format)
+      src_reader <- tryCatch(se_open_table(src), error = function(e) NULL)
+      deid_data  <- if (big) NULL else se_read_window(out_reader, 1L, res$nrec)
+      rv$deid <- list(output = res$output, format = input$out_format,
+                      reader = out_reader, src_reader = src_reader,
+                      data = deid_data, big = big, nrec = res$nrec,
+                      crosswalk = res$crosswalk, summary = res$summary,
+                      resumed = res$resumed, n_chunks = res$n_chunks,
+                      mode = res$mode)
 
       blob <- se_crosswalk_encrypt(res$crosswalk, key)
       saveRDS(blob, p$crosswalk)
@@ -454,15 +459,43 @@ server <- function(input, output, session) {
   })
 
   # ---- review output ----
+  # Side-by-side review reads a bounded row window from disk (via checkpoint.R
+  # readers), so even a huge finished output is browsed a window at a time
+  # rather than loaded whole.
   output$review_controls <- renderUI({
     req(rv$deid)
-    selectInput("review_col", "Column", names(rv$df), width = "300px")
+    wmax <- getOption("se.review_window_max", 1000L)
+    tagList(
+      layout_columns(col_widths = c(4, 4, 4),
+        selectInput("review_col", "Column", rv$deid$reader$header, width = "100%"),
+        numericInput("review_start", "First row", value = 1, min = 1, step = wmax),
+        numericInput("review_n", "Rows to show", value = min(200L, wmax),
+                     min = 1, max = wmax, step = 50)),
+      div(class = "small text-muted", textOutput("review_caption", inline = TRUE)))
+  })
+  output$review_caption <- renderText({
+    req(rv$deid)
+    n <- format(rv$deid$nrec, big.mark = ",")
+    if (isTRUE(rv$deid$big))
+      sprintf("Large output (%s rows) — browse by window; nothing is loaded in full.", n)
+    else sprintf("%s rows.", n)
   })
   output$review_table <- renderDT({
     req(rv$deid, input$review_col)
-    cn <- input$review_col
-    d <- data.frame(row = seq_len(nrow(rv$df)),
-                    original = rv$df[[cn]], de_identified = rv$deid$data[[cn]],
+    cn    <- input$review_col
+    wmax  <- getOption("se.review_window_max", 1000L)
+    start <- max(1L, as.integer(input$review_start %||% 1L))
+    n     <- max(1L, min(as.integer(input$review_n %||% 200L), wmax))
+    deid_w <- se_read_window(rv$deid$reader, start, n)
+    src_w  <- if (!is.null(rv$deid$src_reader))
+                se_read_window(rv$deid$src_reader, start, n) else NULL
+    rows   <- seq.int(start, length.out = nrow(deid_w))
+    oc <- rep(NA_character_, nrow(deid_w))
+    if (!is.null(src_w) && cn %in% names(src_w) && nrow(src_w) == nrow(deid_w))
+      oc <- as.character(src_w[[cn]])
+    d <- data.frame(row = rows, original = oc,
+                    de_identified = if (cn %in% names(deid_w))
+                                      as.character(deid_w[[cn]]) else NA_character_,
                     stringsAsFactors = FALSE)
     datatable(d, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
   })
@@ -486,9 +519,24 @@ server <- function(input, output, session) {
                 multiple = TRUE, width = "100%")
   })
   observeEvent(input$btn_sdc, {
-    req(rv$df, input$sdc_quasi)
-    d <- if (!is.null(rv$deid)) rv$deid$data else rv$df
-    steps <- input$sdc_steps; out <- c()
+    req(input$sdc_quasi)
+    cap <- getOption("se.sdc_sample_cap", 20000L)
+    steps <- input$sdc_steps
+    # Analyse a bounded, representative sample rather than the whole output.
+    if (!is.null(rv$deid)) {
+      samp <- se_sample_table(rv$deid$reader, max_rows = cap)
+      ref  <- if ("dcr" %in% steps && !is.null(rv$deid$src_reader))
+                se_read_blocks(rv$deid$src_reader, samp$blocks) else NULL
+    } else {
+      req(rv$df)
+      samp <- se_sample_table(se_reader_from_df(rv$df), max_rows = cap); ref <- NULL
+    }
+    d <- samp$data
+    out <- c()
+    if (isTRUE(samp$sampled))
+      out <- c(out, sprintf("NOTE: estimated from a random sample of %s of %s rows.",
+                            format(samp$n, big.mark = ","),
+                            format(samp$nrec, big.mark = ",")), "")
     if ("kanon" %in% steps) {
       ka <- se_kanon(d, input$sdc_quasi, input$sdc_k)
       out <- c(out, sprintf("k-anonymity: k_achieved=%d, %d records below k=%d (%.1f%%), uniques=%d",
@@ -510,18 +558,23 @@ server <- function(input, output, session) {
                                               ir$risk_mean, ir$risk_max, ir$expected_reident))
       else out <- c(out, "individual risk: sdcMicro unavailable/failed.")
     }
-    if ("dcr" %in% steps && !is.null(rv$deid)) {
-      dc <- se_dcr(rv$deid$data, rv$df, input$sdc_quasi)
+    if ("dcr" %in% steps && !is.null(rv$deid) && !is.null(ref)) {
+      dc <- se_dcr(d, ref, input$sdc_quasi)
       if (!is.null(dc)) out <- c(out, sprintf("DCR vs original: min=%.3f mean=%.3f exact-matches=%.1f%%",
                                               dc$dcr_min, dc$dcr_mean, 100*dc$frac_zero))
     }
     gate <- se_sdc_gate(d, input$sdc_quasi, list(k = input$sdc_k, max_risk = 0.05))
-    out <- c(out, "", if (gate$pass) "EXPORT GATE: PASS" else
-             paste0("EXPORT GATE: BLOCKED\n  - ", paste(gate$reasons, collapse="\n  - ")))
+    out <- c(out, "",
+             if (gate$pass) "EXPORT GATE: PASS" else
+               paste0("EXPORT GATE: BLOCKED\n  - ", paste(gate$reasons, collapse = "\n  - ")),
+             if (isTRUE(samp$sampled))
+               "  (gate evaluated on a sample — an estimate, not a whole-file guarantee)")
     output$sdc_out <- renderText(paste(out, collapse = "\n"))
     if (!is.null(rv$proj))
       se_audit_append(se_project_paths(rv$proj$dir)$audit, "sdc_run", input$actor,
-                      list(steps = steps, gate_pass = gate$pass))
+                      list(steps = steps, gate_pass = gate$pass,
+                           sampled = isTRUE(samp$sampled), sample_n = samp$n,
+                           nrec = samp$nrec))
   })
 
   # ---- audit ----

@@ -39,6 +39,15 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   a single correct read. Verified headless: chunked == whole-table, resume-after-kill,
   resume-after-folder-move, parallel == sequential, embedded-newline & XLSX paths. Wired into the
   De-identify tab (rows/chunk, parallel workers, live progress, resume status).
+- ✅ **Review and SDC are memory-bounded for large outputs too.** The finished output is only held
+  in memory when it is small (`se.deid_inmem_max`, default 200k rows); above that it stays on disk
+  and is read through bounded readers (`se_open_table` / `se_read_window` / `se_sample_table` in
+  `checkpoint.R`). Review pages a row-window (original vs de-identified read side-by-side from both
+  files); SDC estimates risk from a representative, capped block sample (`se.sdc_sample_cap`,
+  default 20k) with DCR run against the row-aligned original blocks, and clearly labels its output
+  as an estimate (and the export gate as sample-based) whenever sampling was applied. Verified
+  headless + via `testServer`: window reads are exact and row-aligned, sampling is bounded,
+  reproducible, RNG-isolated and disjoint, and both the in-memory and paged/sampled paths render.
 
 ## Phase 4 — Reviewer workflow + audit ✅ core
 - ✅ Role gating (de-identifier vs reviewer), side-by-side original↔de-identified review,

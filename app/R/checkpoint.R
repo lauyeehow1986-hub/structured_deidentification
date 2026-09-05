@@ -322,6 +322,94 @@ se_deidentify_file <- function(proj, path, policy, key, out_format = "csv",
        n_chunks = n_chunks, resumed = resumed, mode = plan$mode)
 }
 
+# --- bounded-memory reading of a finished output (Review + SDC) ---------------
+#
+# Processing is chunked/resumable, but Review and SDC used to pull the whole
+# finished output into memory — exactly what the chunking set out to avoid. A
+# reader gives two bounded ways back into a (possibly huge) table:
+#   * se_read_window  — one contiguous row window (pagination for Review), and
+#   * se_sample_table — a bounded, representative block sample (SDC risk).
+# Over a lazy CSV a reader never holds more than the requested window/sample in
+# memory; XLSX and quoted-newline CSV are read once (the engine's own limit).
+
+#' Wrap an already-loaded data.frame as a reader (uniform API, no re-read).
+se_reader_from_df <- function(df) {
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  list(path = NA_character_, format = "df", mode = "whole",
+       header = names(df), nrec = nrow(df), df_all = df)
+}
+
+#' Open a read-only handle to a table file without loading it all (lazy CSV).
+#' Reuses se_plan_file for ext/header/nrec/mode (and df_all in "whole" mode).
+se_open_table <- function(path, format = NULL) {
+  plan <- se_plan_file(path, chunk_size = .Machine$integer.max)
+  list(path = path, format = format %||% plan$ext, mode = plan$mode,
+       header = plan$header, nrec = plan$nrec, df_all = plan$df_all)
+}
+
+#' Empty (zero-row) frame carrying the reader's columns.
+.se_reader_empty <- function(reader) {
+  if (identical(reader$mode, "whole")) reader$df_all[0, , drop = FALSE]
+  else se_read_csv_chunk(reader$path, reader$header, 0L, 1L)[0, , drop = FALSE]
+}
+
+#' Read a contiguous window: 1-based `start`, up to `n` rows. Bounded memory.
+se_read_window <- function(reader, start = 1L, n = 1000L) {
+  start <- max(1L, as.integer(start)); n <- max(0L, as.integer(n))
+  if (n == 0L || reader$nrec == 0L || start > reader$nrec)
+    return(.se_reader_empty(reader))
+  hi <- min(reader$nrec, start + n - 1L); nn <- hi - start + 1L
+  out <- if (identical(reader$mode, "whole"))
+    reader$df_all[start:hi, , drop = FALSE]
+  else
+    se_read_csv_chunk(reader$path, reader$header, start - 1L, nn) # start-1 = 0-based
+  rownames(out) <- NULL
+  out
+}
+
+#' Read a set of contiguous blocks (list of list(start, n)) and stack them.
+se_read_blocks <- function(reader, blocks) {
+  if (!length(blocks)) return(.se_reader_empty(reader))
+  parts <- lapply(blocks, function(b) se_read_window(reader, b$start, b$n))
+  out <- do.call(rbind, parts); rownames(out) <- NULL; out
+}
+
+#' Pick block slots reproducibly without disturbing the caller's RNG stream.
+.se_sample_slots <- function(n_slots, n_pick, seed) {
+  if (exists(".Random.seed", envir = .GlobalEnv)) {
+    old <- get(".Random.seed", envir = .GlobalEnv)
+    on.exit(assign(".Random.seed", old, envir = .GlobalEnv), add = TRUE)
+  } else {
+    on.exit(if (exists(".Random.seed", envir = .GlobalEnv))
+              rm(list = ".Random.seed", envir = .GlobalEnv), add = TRUE)
+  }
+  set.seed(seed)
+  sample.int(n_slots, n_pick)
+}
+
+#' Bounded, representative sample of a reader for risk estimation.
+#' Reads up to `max_rows` rows as a spread of disjoint `block`-sized slices, so
+#' the memory cost is capped and a mirror reader can replay the same `blocks`
+#' (row-aligned original vs de-identified, for DCR).
+#' @return list(data, rows, blocks, sampled, nrec, n)
+se_sample_table <- function(reader, max_rows = 20000L, block = 2000L, seed = 1L) {
+  nrec <- reader$nrec; max_rows <- max(1L, as.integer(max_rows))
+  if (nrec <= max_rows) {
+    d <- se_read_window(reader, 1L, nrec)
+    return(list(data = d, rows = if (nrec) seq_len(nrec) else integer(0),
+                blocks = if (nrec) list(list(start = 1L, n = nrec)) else list(),
+                sampled = FALSE, nrec = nrec, n = nrow(d)))
+  }
+  block   <- max(1L, min(as.integer(block), max_rows))
+  n_slots <- nrec %/% block                       # full, disjoint block slots
+  n_pick  <- min(n_slots, max(1L, max_rows %/% block))
+  pick    <- sort(.se_sample_slots(n_slots, n_pick, seed))
+  blocks  <- lapply(pick, function(s) list(start = (s - 1L) * block + 1L, n = block))
+  rows    <- unlist(lapply(blocks, function(b) seq.int(b$start, b$start + b$n - 1L)))
+  d       <- se_read_blocks(reader, blocks)
+  list(data = d, rows = rows, blocks = blocks, sampled = TRUE, nrec = nrec, n = nrow(d))
+}
+
 #' Lightweight resume status for the UI (does not process anything).
 se_deidentify_status <- function(proj, path, chunk_size = 50000L) {
   p <- se_project_paths(proj$dir)

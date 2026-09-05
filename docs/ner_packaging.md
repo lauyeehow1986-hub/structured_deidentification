@@ -158,11 +158,14 @@ paths only if you stage them elsewhere: `options(se.llamacpp_bin = "…")` /
 `SE_LLAMACPP_BIN`. Tuning knobs (with defaults): `se.llm_batch` (16 cells per
 model load), `se.llm_ctx` (4096), `se.llm_n_predict` (512).
 
-> **Antivirus will quarantine the binary.** A freshly downloaded, unsigned
-> `llama*.exe` is often silently deleted by AV (Defender / AVG / McAfee seen on
-> the staging box). **Add `bin/llama/` to the AV exclusions** on both the staging
-> and the locked-down machine, or unblock the extracted files, or llama.cpp
-> vanishes and the pass falls back to rules+NER. The GGUF (data) is not flagged.
+> **Antivirus may quarantine the binary — mainly on the staging box.** A freshly
+> downloaded, unsigned `llama*.exe` is often silently deleted by AV (AVG / McAfee
+> seen doing this on the staging box). **Add `bin/llama/` to the AV exclusions on
+> the staging machine** (or unblock the extracted files) before you build the
+> bundle, or llama.cpp vanishes mid-run and the pass falls back to rules+NER. The
+> GGUF (data) is not flagged. Once the bundle is sneakernetted to a locked-down
+> box that does **not** run AVG/McAfee, this does not recur; if the target does
+> run such AV, exclude `bin/llama/` there too.
 
 > **Verify on the staging machine:**
 > ```r

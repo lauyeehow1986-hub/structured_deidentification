@@ -34,10 +34,17 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   Two air-gap hardenings baked in: the `ner`/`probe` runner modes **hard-disable outbound sockets**,
   and Presidio uses a **spaCy-NER-only registry** so its `tldextract`-backed email recognizer can't
   fetch the public-suffix list over the network. Bundling recipe: [docs/ner_packaging.md](ner_packaging.md).
-- ✅ Optional local **Ollama** LLM pass for ambiguous free text, **off by default**
-  (`app/python/detect_llm.py`, `se_llm_scan` / `se_ollama_config`). The only socket in the whole
-  system, loopback-only to a bundled Ollama the operator chose to run — no remote endpoint, no
-  fallback. Findings are labelled hints (confidence ~0.6), never ground truth.
+- ✅ Optional local **LLM pass** for ambiguous free text, **off by default**, two backends
+  (`app/python/detect_llm.py`, `se_llm_scan` / `se_llm_config`). Default is a **socket-free
+  bundled llama.cpp** — a one-shot `llama-cli` subprocess against an auto-discovered
+  `bin/llama/` binary + a single `models/llm/*.gguf` (recommended **Qwen2.5-3B-Instruct Q4_K_M**,
+  Apache-2.0, ~2 GB, fits a 16 GB CPU box); zero-config "drop it in the bundle and it runs". The
+  runner disables outbound sockets for the llama.cpp backend too — only the alternative **Ollama**
+  backend is allowed a loopback socket to a local service the operator chose to run. Findings are
+  labelled hints (`llm:llamacpp` / `llm:ollama`, confidence ~0.6), never ground truth. Verified
+  live on the staging box: R→subprocess→llama.cpp (Qwen2.5-3B) tags "John Tan"/phone spans; the
+  bundled binary + GGUF are `.gitignore`d and sneakernetted. ⚠️ AV (Defender/AVG/McAfee) may
+  quarantine the unsigned `llama*.exe` — exclude `bin/llama/`.
 - ✅ **Verified end-to-end on a connected staging box** with a real bundle: a relocatable
   python-build-standalone CPython 3.12 under `bin/python/` + `presidio-analyzer` + `spacy` +
   `en_core_web_lg`. `se_py_probe()` reports ready and the R→subprocess→Presidio path finds names

@@ -62,7 +62,8 @@ se_py_status <- function() {
   bin <- se_py_binary()
   st <- list(python = !is.null(bin), python_path = bin %||% NA_character_,
              jsonlite = requireNamespace("jsonlite", quietly = TRUE),
-             presidio = NA, spacy = NA, ollama = NA)
+             presidio = NA, spacy = NA, ollama = NA,
+             llm = NA, llm_backend = NA_character_)
   .se_py_state$status <- st
   st
 }
@@ -73,13 +74,21 @@ se_py_probe <- function() {
   st <- se_py_status()
   res <- .se_py_run("probe", list())
   if (is.null(res)) {           # no interpreter / failed -> stays unavailable
-    st$presidio <- FALSE; st$spacy <- FALSE; st$ollama <- FALSE
+    st$presidio <- FALSE; st$spacy <- FALSE
   } else {
     st$presidio <- isTRUE(res$presidio)
     st$spacy    <- isTRUE(res$spacy)
-    # LLM backend usable only if a client lib is present AND a model configured.
-    st$ollama   <- isTRUE(res$ollama) && nzchar(se_ollama_config()$model)
   }
+  # LLM availability (either backend). llamacpp is file-existence only; ollama
+  # additionally needs a client lib present (from the probe) and a model set.
+  cfg <- se_llm_config()
+  st$llm_backend <- cfg$backend
+  st$llm <- !is.null(se_py_binary()) && switch(cfg$backend,
+    llamacpp = nzchar(cfg$llama_bin) && file.exists(cfg$llama_bin) &&
+               nzchar(cfg$model_path) && file.exists(cfg$model_path),
+    ollama   = isTRUE(res$ollama) && nzchar(cfg$ollama_model),
+    FALSE)
+  st$ollama <- isTRUE(st$llm) && identical(cfg$backend, "ollama")  # legacy field
   .se_py_state$status <- st
   st
 }
@@ -100,7 +109,8 @@ se_py_status_text <- function() {
   if (!isTRUE(st$jsonlite)) return("Python NER: jsonlite not installed (rules-only mode).")
   if (!isTRUE(st$python)) return("Python NER: bundled interpreter not configured (rules-only mode).")
   if (isTRUE(st$presidio) && isTRUE(st$spacy)) {
-    tail <- if (isTRUE(st$ollama)) " · local LLM available." else "."
+    tail <- if (isTRUE(st$llm))
+      paste0(" · local LLM (", st$llm_backend, ") available.") else "."
     return(paste0("Python NER: Presidio + spaCy ready", tail))
   }
   if (is.na(st$presidio)) return("Python NER: bundled interpreter found; click Enable NER to probe.")
@@ -108,14 +118,19 @@ se_py_status_text <- function() {
 }
 
 # ---------------------------------------------------------------------------
-# Optional local LLM (Ollama) pass — OFF BY DEFAULT.
+# Optional local LLM pass — OFF BY DEFAULT. Two local backends:
 #
-# Everything here runs against a LOCAL Ollama service on this machine only, via
-# the bundled Python (app/python/detect_llm.py). It is never touched unless the
-# operator both (a) bundles an Ollama client + model and configures it, and
-# (b) explicitly opts in per scan. The pure-R core opens no sockets itself; the
-# only loopback call lives in the opt-in Python layer, keeping the air-gap
-# guarantee auditable in one place.
+#   * llamacpp (RECOMMENDED for air-gap): a one-shot subprocess of a bundled
+#     `llama-cli` against a bundled GGUF model. NO socket — same out-of-process
+#     shape as NER. Zero-config: drop bin/llama/llama-cli(.exe) + a single
+#     models/llm/*.gguf into the bundle and it is auto-discovered.
+#   * ollama: a loopback call to a LOCAL Ollama the operator bundled and runs —
+#     the ONLY socket in the whole system.
+#
+# The pure-R core opens no sockets itself; anything that could is confined to the
+# opt-in Python layer (app/python/detect_llm.py), keeping the air-gap guarantee
+# auditable in one place. Nothing here is touched unless the operator both
+# bundles/configures a backend AND explicitly opts in per scan.
 # ---------------------------------------------------------------------------
 
 #' Ollama endpoint + model, read passively from options/env (no connection).
@@ -124,14 +139,79 @@ se_ollama_config <- function() {
        model = getOption("se.ollama_model", Sys.getenv("SE_OLLAMA_MODEL", "")))
 }
 
+#' llama.cpp binary + GGUF model, discovered passively (file existence only).
+#' Binary: options(se.llamacpp_bin) / SE_LLAMACPP_BIN, else <bundle>/bin/llama/.
+#' Model:  options(se.llamacpp_model) / SE_LLAMACPP_MODEL, else the single .gguf
+#'         under <bundle>/models/llm/ (a qwen2.5-3b file wins if several exist).
+se_llamacpp_config <- function() {
+  root <- se_bundle_root()
+  bin <- getOption("se.llamacpp_bin", Sys.getenv("SE_LLAMACPP_BIN", ""))
+  if (!nzchar(bin)) {
+    cand <- c(file.path(root, "bin", "llama", "llama-cli.exe"),
+              file.path(root, "bin", "llama", "llama-cli"),
+              file.path(root, "bin", "llama", "llama.exe"),
+              file.path(root, "bin", "llama", "llama"))
+    hit <- cand[file.exists(cand)]
+    if (length(hit)) bin <- hit[1]
+  }
+  model <- getOption("se.llamacpp_model", Sys.getenv("SE_LLAMACPP_MODEL", ""))
+  if (!nzchar(model)) {
+    dir <- file.path(root, "models", "llm")
+    g <- if (dir.exists(dir))
+      list.files(dir, pattern = "\\.gguf$", full.names = TRUE, ignore.case = TRUE)
+      else character(0)
+    if (length(g) == 1L) {
+      model <- g[1]
+    } else if (length(g) > 1L) {
+      pref <- g[grepl("qwen2\\.5-3b", tolower(basename(g)))]
+      model <- if (length(pref)) pref[1] else ""   # ambiguous -> require choice
+    }
+  }
+  list(bin = bin, model = model)
+}
+
+#' Resolve which LLM backend to use and its parameters. Explicit
+#' options(se.llm_backend)/SE_LLM_BACKEND wins; otherwise auto-detect: prefer the
+#' socket-free bundled llama.cpp, then a configured Ollama, else none ("").
+se_llm_config <- function() {
+  backend <- getOption("se.llm_backend", Sys.getenv("SE_LLM_BACKEND", ""))
+  lc <- se_llamacpp_config()
+  oc <- se_ollama_config()
+  if (!nzchar(backend)) {
+    backend <- if (nzchar(lc$bin) && nzchar(lc$model)) "llamacpp"
+               else if (nzchar(oc$model)) "ollama" else ""
+  }
+  list(backend      = backend,
+       llama_bin    = lc$bin,
+       model_path   = lc$model,
+       ollama_url   = oc$url,
+       ollama_model = oc$model)
+}
+
 #' LLM scan of a character vector via the bundled Python (out-of-process).
-#' Returns the findings span schema, or an empty frame if the LLM backend is
-#' unavailable/unconfigured. Fails closed.
+#' Dispatches to the resolved backend. Returns the findings span schema, or an
+#' empty frame if the backend is unavailable/unconfigured. Fails closed.
 se_llm_scan <- function(texts) {
-  cfg <- se_ollama_config()
-  if (is.null(se_py_binary()) || !nzchar(cfg$model)) return(.se_empty_ner())
-  r <- .se_py_run("llm", list(texts = as.character(texts),
-                              model = cfg$model, url = cfg$url))
+  if (is.null(se_py_binary())) return(.se_empty_ner())
+  cfg <- se_llm_config()
+  payload <- switch(cfg$backend,
+    llamacpp = {
+      if (!nzchar(cfg$llama_bin) || !file.exists(cfg$llama_bin) ||
+          !nzchar(cfg$model_path) || !file.exists(cfg$model_path))
+        return(.se_empty_ner())
+      list(texts = as.character(texts), backend = "llamacpp",
+           llama_bin = cfg$llama_bin, model_path = cfg$model_path,
+           n_predict = getOption("se.llm_n_predict", 512L),
+           ctx = getOption("se.llm_ctx", 4096L),
+           batch = getOption("se.llm_batch", 16L))
+    },
+    ollama = {
+      if (!nzchar(cfg$ollama_model)) return(.se_empty_ner())
+      list(texts = as.character(texts), backend = "ollama",
+           model = cfg$ollama_model, url = cfg$ollama_url)
+    },
+    return(.se_empty_ner()))
+  r <- .se_py_run("llm", payload)
   if (is.null(r) || !is.data.frame(r) || !nrow(r)) .se_empty_ner() else r
 }
 

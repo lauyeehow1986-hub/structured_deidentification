@@ -12,9 +12,11 @@ Python's OpenSSL cannot safely share one process (the classic
 the app never initialises Python in-process and never provisions anything.
 
 Modes:
-  probe : stdin {}                         -> {"presidio":bool,"spacy":bool,"ollama":bool}
-  ner   : stdin {"texts":[...]}            -> [ span, ... ]   (see detect_ner.py)
-  llm   : stdin {"texts":[...],"model":..} -> [ span, ... ]   (see detect_llm.py)
+  probe : stdin {}                          -> {"presidio":bool,"spacy":bool,"ollama":bool}
+  ner   : stdin {"texts":[...]}             -> [ span, ... ]   (see detect_ner.py)
+  llm   : stdin {"texts":[...],"backend":.} -> [ span, ... ]   (see detect_llm.py)
+          backend "llamacpp" (socket-free, needs llama_bin+model_path) or
+          "ollama" (loopback socket to a local Ollama).
 
 stdout is ALWAYS a single JSON value; on any failure it degrades to an empty
 result so the caller falls back to rules-only.
@@ -68,7 +70,9 @@ def main():
     if here not in sys.path:
         sys.path.insert(0, here)
 
-    if mode in ("probe", "ner"):
+    # The llm pass is allowed a loopback socket ONLY for the ollama backend; the
+    # socket-free llamacpp backend (and probe/ner) run with the network disabled.
+    if mode in ("probe", "ner") or (mode == "llm" and req.get("backend", "") != "ollama"):
         _forbid_network()
 
     result = []
@@ -80,9 +84,16 @@ def main():
             result = detect_ner.ner_scan(req.get("texts", []))
         elif mode == "llm":
             import detect_llm
-            result = detect_llm.llm_scan(req.get("texts", []),
-                                         req.get("model", ""),
-                                         req.get("url", "http://127.0.0.1:11434"))
+            result = detect_llm.llm_scan(
+                req.get("texts", []),
+                model=req.get("model", ""),
+                url=req.get("url", "http://127.0.0.1:11434"),
+                backend=req.get("backend", ""),
+                llama_bin=req.get("llama_bin", ""),
+                model_path=req.get("model_path", ""),
+                n_predict=int(req.get("n_predict", 512)),
+                ctx=int(req.get("ctx", 4096)),
+                batch=int(req.get("batch", 16)))
     except Exception:
         result = {} if mode == "probe" else []
 

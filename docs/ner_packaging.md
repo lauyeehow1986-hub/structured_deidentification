@@ -7,8 +7,9 @@ the **optional** free-text engines:
 
 - **Offline NER** — Microsoft Presidio + spaCy `en_core_web_lg`, for names,
   locations and other entities buried in notes.
-- **Optional local LLM** — an Ollama model for ambiguous free text. Off by
-  default; see the warning at the end.
+- **Optional local LLM** — a small local model for ambiguous free text, off by
+  default. Preferred backend is a **socket-free bundled llama.cpp** (recommended
+  model: Qwen2.5-3B-Instruct Q4_K_M); a local Ollama is an alternative. See §2.
 
 Both are bundled on an **internet-connected staging machine**, then copied to
 the locked-down box. **The locked-down box never downloads anything** — the app
@@ -51,11 +52,14 @@ runtime:
     python/
       python.exe            # Windows portable/embeddable Python  (bin/python/python.exe)
       ...                   # or bin/python/bin/python3 on a portable *nix build
+    llama/                  # optional local LLM (llama.cpp) — see §2
+      llama.exe             # (or llama-cli.exe) + its ggml-*.dll / *.dll siblings
   app/
     python/
       detect_ner.py         # Presidio + spaCy contract (shipped)
-      detect_llm.py         # Ollama contract (shipped, optional)
-  models/                   # optional extra model store (Ollama)
+      detect_llm.py         # llama.cpp + Ollama contract (shipped, optional)
+  models/
+    llm/                    # optional: a single *.gguf for the llama.cpp pass (§2)
 ```
 
 `se_py_binary()` looks for `bin/python/python.exe` (Windows) or
@@ -110,35 +114,103 @@ phone). Then zip the whole bundle and sneakernet it to the locked-down box.
 
 ---
 
-## 2. Optional: bundle a local LLM (Ollama)
+## 2. Optional: bundle a local LLM
 
 Only do this if the reviewers want an LLM second opinion on messy free text.
+There are two backends; **llama.cpp is recommended for the air-gap** because it
+opens **no socket at all** — it runs the same out-of-process, network-disabled
+way as the NER pass. Ollama remains supported as an alternative. The app
+auto-detects a bundled llama.cpp first, then a configured Ollama; force the
+choice with `options(se.llm_backend = "llamacpp" | "ollama")` /
+`SE_LLM_BACKEND`.
+
+### 2a. llama.cpp (recommended, socket-free) — "just copy it in"
+
+Two files make it work, both **auto-discovered** by file existence — no config:
+
+1. **The binary** → `<bundle>/bin/llama/`. Download a llama.cpp **Windows CPU**
+   release (`llama-<build>-bin-win-cpu-x64.zip`) from
+   <https://github.com/ggml-org/llama.cpp/releases> and unzip **all** of it
+   (the `.exe` needs its sibling `ggml-*.dll` / `*.dll`) into `bin/llama/`.
+   Recent builds ship a unified `llama.exe` (invoked as `llama.exe cli …`);
+   older ones ship `llama-cli.exe`. Either is picked up.
+2. **The model** → `<bundle>/models/llm/<one>.gguf`. Drop a single GGUF in that
+   folder; if exactly one is present it is used automatically.
+
+   **Recommended model: Qwen2.5-3B-Instruct, Q4_K_M** (~2 GB, **Apache-2.0** —
+   clean for a governance tool, and strong at structured JSON extraction). On
+   the staging machine:
+
+   ```bash
+   curl -L -o models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
+     https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
+   ```
+
+   For more recall on a box with RAM to spare, use **Qwen2.5-7B-Instruct
+   Q4_K_M** (~4.7 GB, also Apache-2.0) instead — same folder, still
+   auto-detected. Keep total RAM in mind: 16 GB is shared with Windows + R +
+   the resident spaCy model, so a 3B/7B **Q4** is the safe ceiling. If you
+   bundle several GGUFs, a `qwen2.5-3b*` file wins; otherwise point the app at
+   one explicitly with `options(se.llamacpp_model = "…")` / `SE_LLAMACPP_MODEL`.
+
+That's it — copy the whole bundle to the locked-down box and it runs. Override
+paths only if you stage them elsewhere: `options(se.llamacpp_bin = "…")` /
+`SE_LLAMACPP_BIN`. Tuning knobs (with defaults): `se.llm_batch` (16 cells per
+model load), `se.llm_ctx` (4096), `se.llm_n_predict` (512).
+
+> **Antivirus will quarantine the binary.** A freshly downloaded, unsigned
+> `llama*.exe` is often silently deleted by AV (Defender / AVG / McAfee seen on
+> the staging box). **Add `bin/llama/` to the AV exclusions** on both the staging
+> and the locked-down machine, or unblock the extracted files, or llama.cpp
+> vanishes and the pass falls back to rules+NER. The GGUF (data) is not flagged.
+
+> **Verify on the staging machine:**
+> ```r
+> options(se.bundle_root = "<bundle>"); source("app/global.R")
+> se_llm_config()$backend        # "llamacpp"
+> se_py_probe()$llm              # TRUE
+> se_llm_scan(c("Patient John Tan called 91234567"))   # name + phone spans
+> ```
+
+> **Performance.** The CLI reloads the model **once per batch** of `se.llm_batch`
+> cells (no persistent server = no socket). Warm, a 3B-Q4 batch is a few seconds
+> on CPU; the *first* load can take a minute or two while AV scans the DLLs and
+> the 2 GB model is paged in. It is an opt-in second-opinion pass over free-text
+> columns — not a bulk detector — so this is acceptable; keep columns free-text
+> and let rules+NER carry the load.
+
+### 2b. Ollama (alternative, loopback socket)
 
 1. Install [Ollama](https://ollama.com) on the staging machine and pull a small
-   instruct model, e.g. `ollama pull llama3.2`.
+   instruct model, e.g. `ollama pull qwen2.5:3b` (or `llama3.2`).
 2. Copy the Ollama binary and its model store to the bundle (default model store
-   is `~/.ollama/models`; relocate with `OLLAMA_MODELS`). Point the bundle's
-   launcher at a local, bundled Ollama that listens on loopback only.
+   is `~/.ollama/models`; relocate with `OLLAMA_MODELS`). Run a local, bundled
+   Ollama that listens on loopback only.
 3. Add the Python client to the bundled interpreter so `detect_llm.py` can reach
    it: `bin/python/python.exe -m pip install ollama` (or `requests`).
 4. Configure the app:
 
    ```r
-   options(se.ollama_model = "llama3.2",
+   options(se.llm_backend = "ollama",
+           se.ollama_model = "qwen2.5:3b",
            se.ollama_url   = "http://127.0.0.1:11434")   # loopback only
    ```
 
-   (or set `SE_OLLAMA_MODEL` / `SE_OLLAMA_URL`).
+   (or set `SE_LLM_BACKEND` / `SE_OLLAMA_MODEL` / `SE_OLLAMA_URL`).
 
-In the app, tick **Use a local LLM (Ollama) for ambiguous free text** on the
-Detect tab. LLM findings appear in the free-text table tagged `llm:ollama` with
-a modest confidence — treat them as hints for a human, never as ground truth.
+In the app, tick **Use a local LLM (llama.cpp / Ollama) for ambiguous free
+text** on the Detect tab. LLM findings appear in the free-text table tagged
+`llm:llamacpp` or `llm:ollama` with a modest confidence — treat them as hints
+for a human, never as ground truth.
 
-> **Air-gap caveat.** The LLM pass is the *only* part of the whole system that
-> opens a socket, and it opens it to a **local** Ollama on `127.0.0.1` that you
-> chose to bundle and run — no remote endpoint, no fallback. If your deployment
-> forbids any socket at all, leave it off; NER + rules need none. Confirm your
-> Ollama is bound to loopback and that host firewall rules block egress.
+> **Air-gap caveat (Ollama only).** The Ollama backend is the *only* part of the
+> whole system that opens a socket, and it opens it to a **local** Ollama on
+> `127.0.0.1` that you chose to bundle and run — no remote endpoint, no fallback.
+> The llama.cpp backend opens none (the `llm` runner mode disables outbound
+> sockets for every backend except `ollama`). If your deployment forbids any
+> socket at all, use llama.cpp (or leave the LLM off entirely; NER + rules need
+> no network). For Ollama, confirm it is bound to loopback and that host firewall
+> rules block egress.
 
 ---
 

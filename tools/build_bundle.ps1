@@ -3,6 +3,8 @@
 # R library stays under the Windows 260-char limit when extracted into Downloads),
 # audits worst-case path length, checks dependency closure, then zips.
 # Run AFTER tools/stage_r.ps1 has populated bin\R.
+# Ships the Privacy Filter ONNX model (models\pf) and prunes the spaCy model by
+# default (-SlimNER); llama.cpp + GGUF are opt-in (-IncludeLlama/-IncludeModels).
 param(
   # Build to a SHORT external root by default: assembling the tree inside a deep
   # worktree/clone path can itself approach MAX_PATH mid-build (the extracted
@@ -12,11 +14,18 @@ param(
   [switch]$IncludePython = $true,
   [switch]$IncludeLlama  = $false,
   [switch]$IncludeModels = $false,
+  [switch]$IncludePF     = $true,
+  [switch]$SlimNER       = $true,
+  [string]$PFModelDir    = "",
   [string]$Root = "C:\Users\a_twenty_char_userxx\Downloads\sds"  # conservative audit root
 )
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repo
+
+# Privacy Filter model: default to <repo>\models\pf (place the downloaded ONNX
+# model + tokenizer.json + config.json there, or pass -PFModelDir).
+if (-not $PFModelDir) { $PFModelDir = Join-Path $repo "models\pf" }
 
 function Robo($src, $dst) {
   robocopy $src $dst /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
@@ -50,6 +59,10 @@ Robo "bin\R" (Join-Path $stage "bin\R")
 if ($IncludePython -and (Test-Path "bin\python")) { Robo "bin\python" (Join-Path $stage "bin\python") }
 if ($IncludeLlama  -and (Test-Path "bin\llama"))  { Robo "bin\llama"  (Join-Path $stage "bin\llama") }
 if ($IncludeModels -and (Test-Path "models"))     { Robo "models"     (Join-Path $stage "models") }
+if ($IncludePF) {
+  if (Test-Path $PFModelDir) { Robo $PFModelDir (Join-Path $stage "models\pf") }
+  else { throw "IncludePF is set but the Privacy Filter model dir was not found: $PFModelDir (download it there, or pass -PFModelDir, or -IncludePF:`$false)." }
+}
 
 # 3) prune runtime-unneeded deep subtrees (kills RcppEigen/RcppArmadillo include
 #    depth + help/doc/html; shrinks size). Never touches libs/ R/ Meta/ data/.
@@ -64,6 +77,16 @@ if (Test-Path $stageLib) {
 Get-ChildItem $stage -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Get-ChildItem $stage -Recurse -File -Filter *.pyc -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+# Slim the default NER footprint: drop the large spaCy model but KEEP the
+# presidio/spacy libraries, so the optional NER path still imports (and the probe
+# reports NER unavailable gracefully) if a model is added back later.
+if ($SlimNER) {
+  $sp = Join-Path $stage "bin\python\Lib\site-packages"
+  if (Test-Path $sp) {
+    Get-ChildItem $sp -Directory -Filter "en_core_web_*" -ErrorAction SilentlyContinue |
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
 # per-project scratch/state must never ship
 foreach ($junk in "inputs","outputs","work") {
   Get-ChildItem $stage -Recurse -Directory -Filter $junk -ErrorAction SilentlyContinue |

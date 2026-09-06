@@ -492,10 +492,15 @@ server <- function(input, output, session) {
       ident <- input[[paste0("ident_", cn)]] %||% "keep"
       act <- input[[paste0("act_", cn)]] %||% "keep"
       if (act == "redact_freetext") ftcols <- c(ftcols, cn)
+      # The global date-method selector applies ONLY to date columns (those whose
+      # identifier's default generalize is a date method). Non-date generalize
+      # columns (address->region, postal->postal_mask, age->age_band) keep their
+      # own method so they are not corrupted by date parsing.
+      base_gen <- se_identifier(ident)$generalize
+      is_date_col <- act == "generalize" && isTRUE(base_gen %in% c("year", "year_month"))
       opts <- list(fpe_mode = se_identifier(ident)$fpe_mode,
-                   generalize = if (act == "generalize") input$date_method
-                                else se_identifier(ident)$generalize)
-      if (identical(input$date_method, "date_shift")) {
+                   generalize = if (is_date_col) input$date_method else base_gen)
+      if (is_date_col && identical(input$date_method, "date_shift")) {
         opts$shift_window <- as.integer(input$shift_window %||% 365L)
         opts$shift_subject_col <- input$shift_subject_col %||% ""
       }

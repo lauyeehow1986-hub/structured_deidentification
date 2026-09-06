@@ -57,15 +57,19 @@ se_batch_run <- function(proj, plan, opts = list(), progress = NULL) {
     fo$rejects <- character(0)
     policy$freetext_opts <- fo
   }
-  # optional interval-preserving date shift on every generalise column
+  # optional interval-preserving date shift — DATE generalise columns only (leave
+  # address/postal/age generalization untouched).
   if (isTRUE(opts$date_shift) && length(policy$columns)) {
     for (cn in names(policy$columns)) {
       spc <- policy$columns[[cn]]
       if (identical(spc$action, "generalize")) {
-        spc$options$generalize        <- "date_shift"
-        spc$options$shift_window      <- as.integer(opts$shift_window %||% 365L)
-        spc$options$shift_subject_col <- opts$shift_subject_col %||% ""
-        policy$columns[[cn]] <- spc
+        cur <- spc$options$generalize %||% se_identifier(spc$identifier)$generalize
+        if (isTRUE(cur %in% c("year", "year_month", "date_shift"))) {
+          spc$options$generalize        <- "date_shift"
+          spc$options$shift_window      <- as.integer(opts$shift_window %||% 365L)
+          spc$options$shift_subject_col <- opts$shift_subject_col %||% ""
+          policy$columns[[cn]] <- spc
+        }
       }
     }
   }

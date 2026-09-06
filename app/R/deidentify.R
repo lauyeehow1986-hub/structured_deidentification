@@ -277,7 +277,13 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
     if (reversible) {
       keep <- !is.na(orig) & nzchar(trimws(orig))
       if (any(keep)) {
-        uniq <- !duplicated(orig[keep])
+        # De-dup on the (original, token) PAIR, not on original alone: date_shift
+        # maps the same calendar date to DIFFERENT shifted dates per subject, so
+        # a shared date (e.g. an admit date across patients) yields several
+        # distinct pairs that must all be recorded for re-identification. For
+        # pseudonymize/fpe each original maps to one token, so pair-dedup reduces
+        # to the original-only dedup (no behaviour change there).
+        uniq <- !duplicated(paste(orig[keep], new[keep], sep = "\r"))
         crosswalk[[cn]] <- data.frame(
           column = cn, original = orig[keep][uniq], token = new[keep][uniq],
           stringsAsFactors = FALSE)

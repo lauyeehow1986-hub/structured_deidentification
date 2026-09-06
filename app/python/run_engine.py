@@ -14,6 +14,7 @@ the app never initialises Python in-process and never provisions anything.
 Modes:
   probe : stdin {}                          -> {"presidio":bool,"spacy":bool,"ollama":bool}
   ner   : stdin {"texts":[...]}             -> [ span, ... ]   (see detect_ner.py)
+  pf    : stdin {"texts":[...],"model_dir":.} -> [ span, ... ]   (see detect_pf.py)
   llm   : stdin {"texts":[...],"backend":.} -> [ span, ... ]   (see detect_llm.py)
           backend "llamacpp" (socket-free, needs llama_bin+model_path) or
           "ollama" (loopback socket to a local Ollama).
@@ -52,7 +53,8 @@ def _read_request():
 
 def _probe():
     out = {}
-    for name in ("presidio_analyzer", "spacy", "ollama", "requests"):
+    for name in ("presidio_analyzer", "spacy", "ollama", "requests",
+                 "onnxruntime", "tokenizers"):
         try:
             __import__(name)
             out[name] = True
@@ -60,7 +62,8 @@ def _probe():
             out[name] = False
     return {"presidio": out.get("presidio_analyzer", False),
             "spacy": out.get("spacy", False),
-            "ollama": out.get("ollama", False) or out.get("requests", False)}
+            "ollama": out.get("ollama", False) or out.get("requests", False),
+            "onnx": out.get("onnxruntime", False) and out.get("tokenizers", False)}
 
 
 def main():
@@ -72,7 +75,7 @@ def main():
 
     # The llm pass is allowed a loopback socket ONLY for the ollama backend; the
     # socket-free llamacpp backend (and probe/ner) run with the network disabled.
-    if mode in ("probe", "ner") or (mode == "llm" and req.get("backend", "") != "ollama"):
+    if mode in ("probe", "ner", "pf") or (mode == "llm" and req.get("backend", "") != "ollama"):
         _forbid_network()
 
     result = []
@@ -82,6 +85,9 @@ def main():
         elif mode == "ner":
             import detect_ner
             result = detect_ner.ner_scan(req.get("texts", []))
+        elif mode == "pf":
+            import detect_pf
+            result = detect_pf.pf_scan(req.get("texts", []), req.get("model_dir", ""))
         elif mode == "llm":
             import detect_llm
             result = detect_llm.llm_scan(

@@ -23,8 +23,8 @@ se_default_identifiers <- function() {
     list(id="name",        label="Names (full, aliases, initials)", category="direct",
          default_action="pseudonymize", detectors=c("PERSON"), salt="name"),
     # 2. National identification numbers (NRIC / FIN / birth cert / passport)
-    list(id="national_id", label="National ID (NRIC/FIN/passport/birth cert)", category="direct",
-         default_action="pseudonymize", detectors=c("nric","passport"),
+    list(id="national_id", label="National ID (NRIC/FIN/temp IC/passport/birth cert)", category="direct",
+         default_action="pseudonymize", detectors=c("nric","temp_ic","passport"),
          fpe_mode="alnum_upper", salt="natid"),
     # 3. Medical Record Numbers
     list(id="mrn",         label="Medical Record Number (MRN)", category="direct",

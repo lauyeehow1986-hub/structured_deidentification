@@ -73,6 +73,16 @@ se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
     nric = list(type="nric", identifier="national_id",
                 pattern="\\b[STFGMstfgm][0-9]{7}[A-Za-z]\\b",
                 validate=se_nric_valid, base_conf=0.6),
+    # Hospital-assigned TEMPORARY IC (patients with no NRIC/FIN — foreigners,
+    # unregistered newborns, unidentified). SG local convention: an X or Y
+    # prefix, then 7 OR 10 digits, then a trailing letter (e.g. X1234567A,
+    # Y1234567890B). No published check-digit, so pattern-only (no validator);
+    # the X/Y prefix + trailing letter makes the shape distinctive. Handled as
+    # a national_id (same sensitivity/action as NRIC). The leading X/Y keeps it
+    # from colliding with the bare-digit `case` number below.
+    temp_ic = list(type="nric", identifier="national_id",
+                pattern="\\b[XYxy][0-9]{7}(?:[0-9]{3})?[A-Za-z]\\b",
+                validate=NULL, base_conf=0.8),
     email = list(type="email", identifier="email",
                  pattern="\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
                  validate=NULL, base_conf=0.97),
@@ -106,6 +116,14 @@ se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
                # generic passport: 1-2 letters + 6-8 digits (loose, low confidence)
                pattern="\\b[A-Za-z]{1,2}[0-9]{6,8}\\b",
                validate=NULL, base_conf=0.35),
+    # SG admission / case number: exactly 10 digits then a trailing letter
+    # (e.g. 1234567890A). The trailing letter is what distinguishes it from a
+    # bare numeric run and stops the generic `mrn`/`date_compact` detectors from
+    # matching it (their trailing \\b fails against the letter). No check-digit
+    # published, so pattern-only. Mapped to the case_visit identifier.
+    case = list(type="case", identifier="case_visit",
+               pattern="\\b[0-9]{10}[A-Za-z]\\b",
+               validate=NULL, base_conf=0.7),
     mrn = list(type="mrn", identifier="mrn",
                # generic hospital record no: letters + 6-10 digits (tunable)
                pattern="\\b[A-Za-z]{0,3}[0-9]{6,10}\\b",

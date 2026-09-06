@@ -1,6 +1,7 @@
 # app/batch_cli.R — headless batch runner.
 # Usage: Rscript app/batch_cli.R --project <dir> --inputs <dir|glob> [--recursive]
 #        [--workers N] [--out-format csv|xlsx] [--actor NAME] [--force] [--strict]
+#        [--no-pf] [--ft-min-conf N] [--date-shift] [--shift-window N] [--shift-subject-col NAME]
 suppressWarnings(suppressMessages(source("app/global.R", local = FALSE)))
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -23,7 +24,13 @@ res <- se_batch_run(proj, plan, opts = list(
   actor = getopt("--actor", "batch"),
   workers = as.integer(getopt("--workers", "1")),
   out_format = getopt("--out-format", "csv"),
-  force = getflag("--force")),
+  force = getflag("--force"),
+  freetext_opts = list(use_pf = !getflag("--no-pf"),
+                       min_conf = as.numeric(getopt("--ft-min-conf", "0.5")),
+                       types = NULL, rejects = character(0)),
+  date_shift = getflag("--date-shift"),
+  shift_window = as.integer(getopt("--shift-window", "365")),
+  shift_subject_col = getopt("--shift-subject-col", "")),
   progress = function(i, n, f) cat(sprintf("[%d/%d] %s\n", i, n, f)))
 se_batch_write_summary(res)
 print(res$items[, c("file","type","status","action","output","rows","elapsed")])

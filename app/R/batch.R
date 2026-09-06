@@ -50,6 +50,25 @@ se_batch_run <- function(proj, plan, opts = list(), progress = NULL) {
   p          <- se_project_paths(proj$dir)
   key        <- se_resolve_key(proj$hash_scope, proj)
   policy     <- proj$policy
+  # batch-level free-text redaction controls (no interactive per-span review):
+  # the confidence threshold + per-type policy do the gating; rejects stay empty.
+  if (!is.null(opts$freetext_opts)) {
+    fo <- opts$freetext_opts
+    fo$rejects <- character(0)
+    policy$freetext_opts <- fo
+  }
+  # optional interval-preserving date shift on every generalise column
+  if (isTRUE(opts$date_shift) && length(policy$columns)) {
+    for (cn in names(policy$columns)) {
+      spc <- policy$columns[[cn]]
+      if (identical(spc$action, "generalize")) {
+        spc$options$generalize        <- "date_shift"
+        spc$options$shift_window      <- as.integer(opts$shift_window %||% 365L)
+        spc$options$shift_subject_col <- opts$shift_subject_col %||% ""
+        policy$columns[[cn]] <- spc
+      }
+    }
+  }
   detectors  <- se_detectors()
   workers    <- as.integer(opts$workers %||% 1L)
   force      <- isTRUE(opts$force)

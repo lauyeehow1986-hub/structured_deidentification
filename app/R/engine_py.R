@@ -289,39 +289,52 @@ se_dedup_findings <- function(df) {
 #' Scan free-text columns of a data.frame. Returns
 #' data.frame(row, column, match, type, confidence, detector).
 se_detect_freetext <- function(df, ftcols = se_freetext_columns(names(df)),
-                               use_ner = FALSE, use_llm = FALSE,
+                               use_pf = TRUE, use_ner = FALSE, use_llm = FALSE,
                                detectors = se_detectors()) {
   cols <- intersect(ftcols, names(df))
   out <- list()
-  add <- function(row, column, match, type, confidence, detector) {
+  add <- function(row, column, start, end, match, type, identifier,
+                  confidence, detector) {
     if (length(match))
       out[[length(out) + 1L]] <<- data.frame(
-        row = row, column = column, match = match, type = type,
-        confidence = confidence, detector = detector, stringsAsFactors = FALSE)
+        row = row, column = column, start = start, end = end, match = match,
+        type = type, identifier = identifier, confidence = confidence,
+        detector = detector, stringsAsFactors = FALSE)
   }
   for (cn in cols) {
     vals <- as.character(df[[cn]])
     # deterministic rules, per cell
     for (i in seq_along(vals)) {
       sp <- se_scan_text(vals[i], detectors)
-      if (nrow(sp)) add(i, cn, sp$match, sp$type, sp$confidence, sp$detector)
+      if (nrow(sp)) add(i, cn, sp$start, sp$end, sp$match, sp$type,
+                        sp$identifier, sp$confidence, sp$detector)
     }
-    # offline NER, whole column vector (guards itself when unavailable)
+    # Privacy Filter (default), whole column vector (guards itself when absent)
+    if (isTRUE(use_pf)) {
+      ps <- tryCatch(se_pf_scan(vals), error = function(e) NULL)
+      if (!is.null(ps) && nrow(ps))
+        add(ps$row, cn, ps$start, ps$end, ps$match, ps$type,
+            ps$identifier, ps$confidence, ps$detector)
+    }
+    # legacy offline NER (opt-in)
     if (isTRUE(use_ner)) {
       ns <- tryCatch(se_py_scan(vals), error = function(e) NULL)
       if (!is.null(ns) && nrow(ns))
-        add(ns$row, cn, ns$match, ns$type, ns$confidence, ns$detector)
+        add(ns$row, cn, ns$start, ns$end, ns$match, ns$type,
+            ns$identifier, ns$confidence, ns$detector)
     }
-    # optional local LLM (guards itself when unavailable / not opted in)
+    # legacy local LLM (opt-in)
     if (isTRUE(use_llm)) {
       ls <- tryCatch(se_llm_scan(vals), error = function(e) NULL)
       if (!is.null(ls) && nrow(ls))
-        add(ls$row, cn, ls$match, ls$type, ls$confidence, ls$detector)
+        add(ls$row, cn, ls$start, ls$end, ls$match, ls$type,
+            ls$identifier, ls$confidence, ls$detector)
     }
   }
   res <- if (length(out)) do.call(rbind, out) else
-    data.frame(row = integer(0), column = character(0), match = character(0),
-               type = character(0), confidence = numeric(0),
+    data.frame(row = integer(0), column = character(0), start = integer(0),
+               end = integer(0), match = character(0), type = character(0),
+               identifier = character(0), confidence = numeric(0),
                detector = character(0), stringsAsFactors = FALSE)
   se_dedup_findings(res)
 }

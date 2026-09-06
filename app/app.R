@@ -249,6 +249,12 @@ ui <- page_navbar(
         downloadButton("dl_bundle", "Export signed bundle (.zip)"),
         fileInput("imp_bundle", "Import a bundle (.zip)", accept = ".zip"),
         actionButton("btn_cert", "Generate de-identification certificate"),
+        div(class = "mt-2", downloadButton("dl_cert_pdf",
+              "Download human-readable certificate + report (PDF)")),
+        p(class = "small text-muted mt-1",
+          "The PDF is rendered offline in pure R (no network, no external ",
+          "tools) and paginates the certificate, column policy, file manifest, ",
+          "signatures, and the full tamper-evident audit trail."),
         verbatimTextOutput("cert_out")))
   ),
 
@@ -284,7 +290,7 @@ ui <- page_navbar(
 server <- function(input, output, session) {
   rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
                        findings = NULL, profile = NULL, suggestion = NULL,
-                       userkey = NULL, doc = NULL,
+                       userkey = NULL, doc = NULL, cert = NULL,
                        sdc_treated = NULL, sdc_steps = NULL)
 
   # Re-render after an explicit probe so the operator sees the new status.
@@ -926,20 +932,25 @@ server <- function(input, output, session) {
   observeEvent(input$btn_cert, {
     req(rv$proj)
     p <- se_project_paths(rv$proj$dir)
-    cert <- list(
-      title = "De-identification Certificate",
-      project = rv$proj$name, generated = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
-      hash_scope = rv$proj$hash_scope,
-      policy_columns = length(rv$proj$policy$columns %||% list()),
-      manifest_sha256 = if (file.exists(p$manifest)) se_sha256_file(p$manifest) else NA,
-      audit = se_audit_verify(p$audit),
-      frameworks = c("PDPA (Singapore)", "HIPAA Safe Harbor (reference)",
-                     "SingHealth / IRB governance"),
-      disclaimer = "Not for clinical or diagnostic use. The data controller is responsible for confirming adequacy of de-identification before release.")
-    jsonlite::write_json(cert, p$certificate, auto_unbox = TRUE, pretty = TRUE)
+    cert <- se_cert_data(rv$proj, p)
+    rv$cert <- cert
+    # JSON certificate: a superset of the legacy fields, still auto-unboxed.
+    jsonlite::write_json(cert, p$certificate, auto_unbox = TRUE, pretty = TRUE,
+                         null = "null")
     output$cert_out <- renderText(paste(readLines(p$certificate), collapse = "\n"))
     se_audit_append(p$audit, "certificate", input$actor, list())
   })
+
+  output$dl_cert_pdf <- downloadHandler(
+    filename = function()
+      paste0(rv$proj$name %||% "project", "_certificate.pdf"),
+    content = function(file) {
+      req(rv$proj)
+      p <- se_project_paths(rv$proj$dir)
+      cert <- rv$cert %||% se_cert_data(rv$proj, p)   # fresh if not yet generated
+      se_report_pdf(cert, file)
+      se_audit_append(p$audit, "certificate_pdf", input$actor, list())
+    })
 
   # ---- documents (PDF / XML / vendor ECG) ----
   observeEvent(input$doc_file, {

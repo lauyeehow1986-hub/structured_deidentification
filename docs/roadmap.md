@@ -108,10 +108,26 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   labelled. Headless + `testServer` suites cover every transform, reproducibility, the
   Preview/Apply/Reset/measure wiring, and that a treatment can drive the gate to PASS.
 
-## Phase 6 — Signed handoff + certificate + reports ✅ core / ⬜ PDF report
+## Phase 6 — Signed handoff + certificate + reports ✅
 - ✅ Per-user signature on each stage; export/import signed project bundle (`.zip`); signed
   **de-identification certificate** (JSON) citing PDPA / HIPAA Safe Harbor / SingHealth-IRB.
-- ⬜ Human-readable PDF certificate + full report.
+- ✅ **Human-readable PDF certificate + full report** (`app/R/report.R`), rendered **offline in
+  pure R** via the base `grDevices::pdf()` device — no pandoc, LaTeX, headless browser, or
+  network, so the air-gapped box that runs the app also emits the certificate. Split into a
+  testable data half and a rendering half:
+  - `se_cert_data(proj, paths)` assembles the certificate content — a **superset** of the legacy
+    `certificate.json` fields, so the JSON stays backward compatible — including the column
+    de-identification policy, the SHA-256 file manifest, per-signature **verification** status
+    (each detached signature is re-verified), audit-action counts, any opt-in SDC actions, and
+    the tamper-evident **chain-verification** result.
+  - `se_report_pdf(cert, file)` paginates it onto A4 with a small cursor-based layout engine
+    (word-wrapped paragraphs, key/value rows, bulleted lists, and tables that repeat their
+    header across page breaks), a title block, per-page footers, and a boxed disclaimer.
+  - Wired into the **Sign-off** tab: "Generate certificate" writes the JSON and caches the data;
+    "Download … (PDF)" renders the report and logs a `certificate_pdf` action to the audit trail.
+  - ASCII-only drawn text and a vector bullet marker (no Symbol-font glyphs) keep rendering
+    robust on a locked-down viewer. Headless + `testServer` suites confirm the assembled data,
+    the rendered PDF's text content (via `pdftools`), pagination, and the download wiring.
 
 ## Phase 7 — PDF + XML + vendor ECG ✅
 Pure-R, air-gap safe, in-process (pdftools / tesseract / magick / xml2 are bundled R

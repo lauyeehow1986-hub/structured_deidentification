@@ -57,6 +57,9 @@ app/
     sdc.R          statistical disclosure control (opt-in): k-anon, l-div, SUDA, risk, DCR, gate
     sdc_transforms.R  opt-in risk-reduction transforms: suppression / recode / top-bottom /
                    microaggregation / PRAM / noise (Gaussian + DP-style Laplace) / synthesis
+    report.R       human-readable de-id certificate + full report as a paginated PDF
+                   (pure R via grDevices::pdf — no pandoc/LaTeX/network); se_cert_data
+                   assembles the content (superset of certificate.json), se_report_pdf renders
     keystore.R     global vs project key material
     project.R      portable project folder, manifest (SHA-256), input registration
     engine_py.R    passive, air-gap-safe bridge to the bundled Python NER

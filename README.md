@@ -12,7 +12,7 @@ digital-signature sign-off.
 > patient data into a committed repo — use the synthetic `samples/` only.
 
 ## Key features
-- **15-identifier catalogue**, editable per project (interim default is HIPAA-adapted for SG).
+- **15-identifier catalogue** (the canonical SingHealth 15 under PDPA + HBRA), editable per project.
 - **Detection**: deterministic rules + validators (real NRIC/FIN checksum, phone, email, dates),
   column profiling that flags **out-of-place values**, and optional offline **Presidio/spaCy NER**
   for free text.

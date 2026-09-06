@@ -210,6 +210,15 @@ def _scan_llamacpp(texts: List[str], model_path: str, llama_bin: str,
             needle = str(span.get("text", ""))
             if not needle:
                 continue
+            # Drop degenerate spans. Small models (esp. when they degrade into a
+            # repetitive loop) sometimes emit one object PER CHARACTER, e.g.
+            # "S1234567D" as {"text":"S"},{"text":"1"},... Each single char is
+            # trivially a verbatim substring, so it would survive the match below
+            # and flood the reviewer with junk. No real identifier is a single
+            # character or pure punctuation, so require >=2 chars with at least
+            # one alphanumeric.
+            if len(needle.strip()) < 2 or not any(c.isalnum() for c in needle):
+                continue
             label = str(span.get("type", "other")).lower()
             ident = _LABEL_TO_IDENTIFIER.get(label, "other_id")
             # Locate the span by its VERBATIM text, not the model's index (small

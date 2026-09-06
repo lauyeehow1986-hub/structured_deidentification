@@ -196,5 +196,10 @@ manifest, and logged in the audit trail (`xml_scrub` / `pdf_redact` actions).
     [docs/packaging.md](packaging.md).
 
 ## Open item
-- Replace the interim HIPAA-adapted default identifier set with the **canonical 15 SingHealth
-  identifiers** (paste them in; the set is editable so this does not block earlier phases).
+- **Closed (2026-09-06).** The default identifier catalogue in `app/R/identifiers.R`
+  (`se_default_identifiers()`) is the **canonical 15 SingHealth identifiers** (PDPA + HBRA):
+  names; NRIC/FIN/passport/birth-cert; MRN; case/visit/episode; address; postal code; phone;
+  fax; email; date of birth (year only); date of death; device/serial; biometric;
+  full-face photo; other unique identifier/code. It remains **editable per project** via the
+  Policy tab, so a site can swap in a revised institutional list at any time without a code
+  change.

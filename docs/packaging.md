@@ -91,14 +91,29 @@ finds a problem.
 
 ## Deploy + verify (on the target)
 
-1. Copy `sds.zip` to the target's `Downloads`.
-2. Extract with Windows 11's built-in **`tar.exe`** (handles long paths well) or
-   File Explorer — **keep the folder short**: `C:\Users\<you>\Downloads\sds`.
-   Do **not** rename it to something long or nest it deeper.
-   ```powershell
-   cd $env:USERPROFILE\Downloads
-   tar.exe -xf sds.zip           # -> Downloads\sds
-   ```
+1. Copy the zip to the target's `Downloads`.
+2. Extract it and **keep the folder short** — `C:\Users\<you>\Downloads\sds`
+   (the LLM bundle extracts to `sds_full`, which is still safe; rename it to
+   `sds` if you like). Do **not** nest it deeper or give it a long name.
+   - **Recommended — File Explorer:** right-click the zip -> **Extract All...**
+     The Windows shell handles these Zip64 archives (including the >4 GB LLM
+     bundle) with no admin rights.
+   - **Scripted (locked-down-safe), handles Zip64 / >4 GB:**
+     ```powershell
+     Add-Type -AssemblyName System.IO.Compression.FileSystem
+     [System.IO.Compression.ZipFile]::ExtractToDirectory(
+       "$env:USERPROFILE\Downloads\sds.zip", "$env:USERPROFILE\Downloads")
+     ```
+   - **Do NOT use `tar.exe -xf`** on these bundles. The zip is produced by .NET
+     `ZipFile` (native Zip64); Windows' bundled **bsdtar misreads it** ("this
+     does not look like a tar archive") and extracts nothing. `Expand-Archive`
+     (PowerShell 5.1) can also choke on the >4 GB LLM bundle. Use Explorer or the
+     .NET call above.
+   - **Antivirus note:** some AV (AVG / Defender) quarantines `bin\R\bin\x64\
+     Rscript.exe` (and the unsigned `bin\llama\*.exe`) when it lands in certain
+     folders — extracting under your **user profile** (`Downloads`) avoids this on
+     the tested machine. If R won't start, confirm `bin\R\bin\x64\Rscript.exe`
+     still exists and restore it / add an AV exclusion for the bundle folder.
 3. From inside the extracted folder, run the clean-machine verifier:
    ```powershell
    cd $env:USERPROFILE\Downloads\sds

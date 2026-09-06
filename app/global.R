@@ -11,7 +11,7 @@ se_source_dir <- function(dir) {
   files <- c("hashchain.R", "crypto.R", "identifiers.R", "detect_r.R",
              "profile.R", "deidentify.R", "xml_scrub.R", "pdf_redact.R",
              "keystore.R", "project.R", "checkpoint.R", "sdc.R",
-             "sdc_transforms.R", "report.R", "engine_py.R")
+             "sdc_transforms.R", "report.R", "engine_py.R", "batch.R")
   for (f in files) {
     fp <- file.path(dir, f)
     if (file.exists(fp)) sys.source(fp, envir = globalenv())

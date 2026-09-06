@@ -23,6 +23,8 @@ work/
 # --- Bundled portable runtime (shipped in release zips, not in git) ---
 /bin/
 /models/
+# --- Built release bundles (produced by tools/build_bundle.ps1) ---
+/dist/
 
 # --- R ---
 .Rproj.user/

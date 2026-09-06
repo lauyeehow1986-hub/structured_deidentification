@@ -282,7 +282,22 @@ ui <- page_navbar(
         uiOutput("doc_status"),
         div(class = "mt-2", downloadButton("dl_doc", "Download redacted file"))),
       card(card_header("Findings / changes"), DTOutput("doc_findings")))
-  )
+  ),
+
+  # BATCH · run the same pipelines over many files
+  nav_panel("Batch", icon = icon("layer-group"),
+    h4("Batch de-identification"),
+    p(class="small text-muted", "Runs the same pipelines as the single-file tabs ",
+      "over many inputs into this project's outputs, manifest, and audit trail. ",
+      "Tables use the current column policy; PDF/XML use the Documents pipeline."),
+    textInput("batch_dir", "Input folder (or ;-separated paths)"),
+    checkboxInput("batch_recursive", "Recurse into subfolders", FALSE),
+    numericInput("batch_workers", "Parallel workers", 1, min = 1, max = 8),
+    checkboxInput("batch_force", "Redo files that already have output", FALSE),
+    actionButton("btn_batch", "Run batch", class = "btn-primary"),
+    br(), br(),
+    DTOutput("batch_tbl"),
+    downloadButton("dl_batch_summary", "Download batch summary (CSV)"))
 )
 
 # ---- server -----------------------------------------------------------------
@@ -291,7 +306,7 @@ server <- function(input, output, session) {
   rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
                        findings = NULL, profile = NULL, suggestion = NULL,
                        userkey = NULL, doc = NULL, cert = NULL,
-                       sdc_treated = NULL, sdc_steps = NULL)
+                       sdc_treated = NULL, sdc_steps = NULL, batch = NULL)
 
   # Re-render after an explicit probe so the operator sees the new status.
   output$py_status <- renderText({ input$btn_enable_ner; se_py_status_text() })
@@ -1085,6 +1100,30 @@ server <- function(input, output, session) {
   output$dl_doc <- downloadHandler(
     filename = function() basename(rv$doc$output %||% "redacted_output"),
     content = function(file) { req(rv$doc$output); file.copy(rv$doc$output, file, overwrite = TRUE) })
+
+  # BATCH · run the same pipelines over many files
+  observeEvent(input$btn_batch, {
+    req(rv$proj); p <- se_project_paths(rv$proj$dir)
+    plan <- se_batch_plan(strsplit(input$batch_dir %||% "", ";")[[1]],
+                          recursive = isTRUE(input$batch_recursive))
+    if (!nrow(plan)) { showNotification("No files found.", type="warning"); return() }
+    withProgress(message = "Running batch...", value = 0, {
+      res <- se_batch_run(rv$proj, plan,
+        opts = list(actor = input$actor, workers = as.integer(input$batch_workers %||% 1L),
+                    force = isTRUE(input$batch_force)),
+        progress = function(i, n, f) setProgress(value = i/n, detail = sprintf("%d/%d %s", i, n, f)))
+      se_batch_write_summary(res); rv$proj <- res$project; rv$batch <- res
+    })
+    showNotification(sprintf("Batch: %d ok, %d error, %d skipped.",
+      rv$batch$totals$ok, rv$batch$totals$error, rv$batch$totals$skipped), type="message")
+  })
+  output$batch_tbl <- renderDT({
+    req(rv$batch)
+    datatable(rv$batch$items, options = list(scrollX = TRUE, pageLength = 15), rownames = FALSE)
+  })
+  output$dl_batch_summary <- downloadHandler(
+    filename = function() paste0(rv$proj$name %||% "project", "_batch_summary.csv"),
+    content  = function(file) data.table::fwrite(rv$batch$items, file))
 }
 
 shinyApp(ui, server)

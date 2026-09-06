@@ -44,7 +44,7 @@ controller remains responsible for confirming adequacy of de-identification befo
 ## Project layout
 ```
 app/
-  app.R            Shiny UI + server (10 tabs incl. Documents: PDF/XML/ECG redaction)
+  app.R            Shiny UI + server (11 tabs incl. Documents: PDF/XML/ECG redaction, and Batch)
   global.R         loads the core in order
   R/
     crypto.R       keyed HMAC pseudonyms, Feistel FPE, AEAD crosswalk, ed25519 signatures
@@ -67,11 +67,19 @@ app/
                    (scrub header PHI, preserve waveform payload; pure R via xml2)
     pdf_redact.R   PDF true redaction (digital + Tesseract OCR): rasterize + paint +
                    flatten to image-only PDF (removes text layer); pure R
+    batch.R        batch runner over many files: se_batch_plan routes by type, se_batch_run
+                   drives the existing table/PDF/XML pipelines into one project (fail-soft,
+                   idempotent, parallel; merges crosswalk, manifest, audit); pure R
+  batch_cli.R      headless CLI (args -> se_batch_run); driven by run_batch.ps1/.bat
   python/
     detect_ner.py  Presidio + spaCy NER (bundled model; no download)
 samples/           synthetic test data + generator (make_sample.R) — NO real data
-docs/roadmap.md    phased plan and status
-run.ps1 / run.bat  portable launcher
+tools/             packaging toolchain (build machine): stage_r.ps1 (relocatable R + dep
+                   closure), build_bundle.ps1 (assemble/prune/audit/closure/zip),
+                   audit_pathlen.ps1 (MAX_PATH gate), check_closure.ps1, verify_clean_machine.ps1
+docs/roadmap.md    phased plan and status;  docs/packaging.md  portable-bundle build + verify
+run.ps1 / run.bat          portable launcher (interactive app)
+run_batch.ps1 / .bat       headless batch launcher
 ```
 
 ## Conventions

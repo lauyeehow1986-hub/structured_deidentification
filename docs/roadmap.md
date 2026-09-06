@@ -161,11 +161,39 @@ manifest, and logged in the audit trail (`xml_scrub` / `pdf_redact` actions).
   keyed pseudonyms stable, flattened output has no recoverable text, OCR guard confirms
   targets unreadable while clinical text survives).
 
-## Phase 8 — Batch + LLM + packaging ⬜
-- ⬜ Batch runner over many files/projects.
-- ⬜ Optional Ollama LLM pass.
-- ⬜ Transitively-closed portable bundle (portable R + Python + Tesseract) as an unzip-and-run
-  zip; end-to-end verification on a clean machine.
+## Phase 8 — Batch + LLM + packaging ✅
+- ✅ **Batch runner** over many files (`app/R/batch.R`). `se_batch_plan` routes each input by
+  type; `se_batch_run` drives the *existing* pipelines — CSV/XLSX through the Phase-3
+  chunked/resumable/parallel engine, PDF through Phase-7 true redaction, XML/ECG through the
+  waveform-preserving scrub — into **one** project's `outputs/`, merged crosswalk, SHA-256
+  manifest, and hash-chained audit (`batch_item` / `batch_run` actions). **Fail-soft** (a bad
+  file is an `error` row, the run continues), **idempotent** (skips files already output unless
+  `force`; re-decrypts and merges the prior crosswalk so a resumed run never loses mappings),
+  and **parallel** over `future.apply`. Two surfaces on the same engine: a headless CLI
+  (`app/batch_cli.R` + `run_batch.ps1`/`.bat`, `--project/--inputs/--recursive/--workers/
+  --out-format/--actor/--force/--strict`, writes `batch_summary.{json,csv}`) and a **Batch tab**
+  (input folder, recurse, workers, force, per-item status table, summary download).
+- ✅ **Optional Ollama LLM pass** — the socket-permitted loopback Ollama backend already exists
+  from Phase 2 (`detect_llm.py` / `se_llm_config`); batch and detection route to it via the
+  same opt-in toggles. No new detection code.
+- ✅ **Transitively-closed portable bundle + clean-machine verification** (`tools/`). A
+  relocatable R (runtime + the transitive `Depends`/`Imports`/`LinkingTo` closure, staged by
+  `stage_r.ps1` with no compilation) plus the optional bundled Python. `build_bundle.ps1`
+  assembles → **prunes** runtime-unneeded deep subtrees (R `include/ doc/ html/ help/ tests/`,
+  Python `__pycache__/`) → **audits worst-case path length** (`audit_pathlen.ps1`) → checks the
+  **dependency closure** (`check_closure.ps1`, R + Python) → zips (native .NET `ZipFile`).
+  `verify_clean_machine.ps1` runs on the target: path audit against the real root, every R
+  package loads from the bundle alone (per-user library neutralised), and a smoke batch de-id
+  whose audit chain verifies.
+  - **MAX_PATH-safe by construction** (the box can't enable long-path support): short root
+    (`Downloads\sds`) + pruning the Eigen/Armadillo header depth keep the worst-case absolute
+    path to **163** at a real `Downloads\sds` (well under 260). The build fails closed if the
+    audit or closure check trips. Verified end-to-end: `sds.zip` (~667 MB, R + Python) extracts
+    into `C:\Users\<user>\Downloads\sds` and passes `verify_clean_machine.ps1`.
+  - Tesseract/poppler/ImageMagick ride **inside** the R `tesseract`/`pdftools`/`magick`
+    packages (no separate binary); `bin/llama/` is excluded from the default zip (AV
+    quarantines the unsigned exes) and sneakernetted separately. See
+    [docs/packaging.md](packaging.md).
 
 ## Open item
 - Replace the interim HIPAA-adapted default identifier set with the **canonical 15 SingHealth

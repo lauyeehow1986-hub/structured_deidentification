@@ -62,7 +62,7 @@ se_py_status <- function() {
   bin <- se_py_binary()
   st <- list(python = !is.null(bin), python_path = bin %||% NA_character_,
              jsonlite = requireNamespace("jsonlite", quietly = TRUE),
-             presidio = NA, spacy = NA, ollama = NA,
+             presidio = NA, spacy = NA, ollama = NA, onnx = NA, pf = NA,
              llm = NA, llm_backend = NA_character_)
   .se_py_state$status <- st
   st
@@ -79,6 +79,8 @@ se_py_probe <- function() {
     st$presidio <- isTRUE(res$presidio)
     st$spacy    <- isTRUE(res$spacy)
   }
+  st$onnx <- if (is.null(res)) FALSE else isTRUE(res$onnx)
+  st$pf   <- isTRUE(st$onnx) && isTRUE(se_pf_config()$available)
   # LLM availability (either backend). llamacpp is file-existence only; ollama
   # additionally needs a client lib present (from the probe) and a model set.
   cfg <- se_llm_config()
@@ -103,14 +105,41 @@ se_py_scan <- function(texts) {
   if (is.null(r) || !is.data.frame(r) || !nrow(r)) .se_empty_ner() else r
 }
 
+#' Privacy Filter model directory, discovered passively (file existence only —
+#' never runs anything, never touches the network). options(se.pf_dir) /
+#' SE_PF_DIR, else <bundle>/models/pf/. `available` requires an .onnx plus the
+#' tokenizer and config next to it.
+se_pf_config <- function() {
+  dir <- getOption("se.pf_dir", Sys.getenv("SE_PF_DIR", ""))
+  if (!nzchar(dir)) dir <- file.path(se_bundle_root(), "models", "pf")
+  has_model <- dir.exists(dir) &&
+    length(list.files(dir, pattern = "\\.onnx$", ignore.case = TRUE)) > 0L &&
+    file.exists(file.path(dir, "tokenizer.json")) &&
+    file.exists(file.path(dir, "config.json"))
+  list(dir = dir, available = isTRUE(has_model))
+}
+
+#' Privacy Filter scan of a character vector via the bundled Python, out-of-
+#' process (ONNX). Returns the findings span schema (row, start, end, match,
+#' type, identifier, detector, confidence) or an empty frame. Fails closed.
+se_pf_scan <- function(texts) {
+  if (is.null(se_py_binary())) return(.se_empty_ner())
+  cfg <- se_pf_config()
+  if (!isTRUE(cfg$available)) return(.se_empty_ner())
+  r <- .se_py_run("pf", list(texts = as.character(texts), model_dir = cfg$dir))
+  if (is.null(r) || !is.data.frame(r) || !nrow(r)) .se_empty_ner() else r
+}
+
 #' Human-readable one-liner for the UI.
 se_py_status_text <- function() {
   st <- se_py_status()
   if (!isTRUE(st$jsonlite)) return("Python NER: jsonlite not installed (rules-only mode).")
   if (!isTRUE(st$python)) return("Python NER: bundled interpreter not configured (rules-only mode).")
   if (isTRUE(st$presidio) && isTRUE(st$spacy)) {
-    tail <- if (isTRUE(st$llm))
-      paste0(" · local LLM (", st$llm_backend, ") available.") else "."
+    tail <- paste0(
+      if (isTRUE(st$pf)) " · Privacy Filter ready." else "",
+      if (isTRUE(st$llm)) paste0(" · local LLM (", st$llm_backend, ") available.")
+      else if (!isTRUE(st$pf)) "." else "")
     return(paste0("Python NER: Presidio + spaCy ready", tail))
   }
   if (is.na(st$presidio)) return("Python NER: bundled interpreter found; click Enable NER to probe.")

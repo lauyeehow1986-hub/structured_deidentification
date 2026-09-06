@@ -44,6 +44,13 @@ for the Singapore-specific identifiers PF has no native category for.
 - A smaller, AV-clean default bundle (no unsigned `bin/llama` exes).
 - Deterministic rules remain primary for NRIC/FIN/MRN/phone/email/postal.
 - MediPhi and Presidio code paths retained as optional, off-by-default backends.
+- A new **date-shift** transform *option* (consistent keyed per-subject offset,
+  preserving intervals, reversible via the crosswalk) alongside the existing
+  date generalisation (drop day / drop day+month).
+- Free-text redaction driven by **reviewed/accepted** detector spans, gated by a
+  confidence threshold and per-type toggles, so a detector (PF included) can
+  never silently over-redact — every span is visible and rejectable before it
+  alters output.
 
 ## Non-goals
 
@@ -106,6 +113,64 @@ them. PF may tag an NRIC as `account_number` → `other_id`; harmless (still
 flagged/redacted, and the rule's `national_id` finding wins the dedup on the same
 span by higher confidence).
 
+## Date de-identification (transforms — separate from detection)
+
+Detection (rules + PF) only *finds* dates; the transform engine (`deidentify.R`)
+decides what to do with them, per column, from the Policy tab. PF changes nothing
+here. Three date treatments exist for structured date/`dob` columns:
+
+| method | result | interval-preserving | reversible |
+|---|---|---|---|
+| `generalize` → `year` | `1975` | no | no |
+| `generalize` → `year_month` | `1975-03` (drops day) | no | no |
+| `generalize` → `date_shift` *(new, optional)* | `1975-03-14` → `1975-06-02` | **yes** | yes (crosswalk) |
+
+**`date_shift` (new).** A consistent per-subject offset in days, so every date
+belonging to the same subject moves by the same amount and *all intervals between
+events are preserved* (visit-to-visit, DOB-to-procedure). Offset is deterministic
+from the scope key: `offset_days = HMAC(key, salt || subject_id) mod (2W+1) − W`
+(HMAC = `openssl::sha256(msg, key=)`, the same keyed-hash primitive
+`se_pseudonymize`/`se_fpe` use in `crypto.R`),
+where `W` = `opts$shift_window` (default 365). `subject_id` comes from
+`opts$shift_subject_col` (a column, e.g. the pseudonymised MRN); if unset, a
+constant salt shifts the whole dataset by one offset (still hides absolute dates,
+preserves every interval). Because it is keyed and deterministic, the original↔
+shifted mapping is recorded in the AEAD crosswalk (like `pseudonymize`/`fpe`),
+so authorised re-identification recovers the true date. Implemented as
+`se_shift_date(x, key, salt, subject_id, window)` and wired into the `generalize`
+switch in `se_deidentify_table`. It is an **option, not a default** — the default
+date treatment stays `year`.
+
+## Reviewable free-text redaction (over-redaction safeguard)
+
+Today free-text findings are advisory (a read-only table) and the redaction step
+blindly re-scans each cell with the deterministic R detectors at transform time
+(`se_redact_freetext_value` → `se_scan_text`), so PF-found spans never reach the
+output. Wiring PF into redaction without a gate would risk over-redaction. The
+fix makes redaction consume **reviewed, accepted** spans, layered so nothing is
+removed that a human has not had the chance to reject:
+
+1. **Confidence tiers preserved.** Rules ~0.90–0.99 (validated NRIC/FIN highest),
+   PF 0.85, NER/LLM lower — so rules stay authoritative on overlaps.
+2. **Min-confidence threshold** (run-level, default 0.5) drops weak spans before
+   they are ever shown as accepted.
+3. **Per-type toggles.** The de-identifier can switch off whole categories in
+   free text (e.g. keep `date` in prose, redact only `name`/`nric`).
+4. **Per-span accept/reject.** The findings table gains an `accept` column
+   (editable; rules default accepted, PF default accepted **but rejectable**).
+   The de-identifier can reject any individual span.
+5. **Redaction from accepted spans.** New `se_redact_freetext_spans(text, spans)`
+   redacts a cell using *only* that cell's accepted findings (offset-based, right-
+   to-left), replacing the blind re-scan. `se_deidentify_table` receives the
+   accepted findings and routes free-text columns through it.
+6. **Reviewer diff gate (existing).** The Review-output tab already shows original
+   ↔ de-identified side by side with a reviewer approve/return decision — the
+   second human gate before the output is released.
+
+Empirically the risk is low: in the A/B, PF scored 1.00 precision / 0 false
+positives (it left institutions and clinical numbers alone). These controls make
+that reviewable rather than assumed.
+
 ## Components
 
 ### `app/python/detect_pf.py` (new)
@@ -145,8 +210,39 @@ span by higher confidence).
   (default checked), driven by `se_py_probe()$pf`. NER and LLM become secondary
   "advanced / optional backend" toggles (default off), with a note they require
   the separately-bundled models.
+- Free-text findings table becomes **editable**: add an `accept` checkbox column
+  (rules default TRUE, PF default TRUE-but-rejectable), plus a min-confidence
+  slider (default 0.5) and per-type include toggles. `rv$findings` gains the
+  `accept` flag; the de-identify step reads only accepted spans.
+- Policy tab: for date/`dob` columns, add `date_shift` to the generalise-method
+  choices, with `shift_window` (days, default 365) and an optional
+  `shift_subject_col` selector.
 - `batch.R` / `batch_cli.R`: `--pf` on by default, `--no-pf` to disable; keep the
-  existing NER/LLM opts.
+  existing NER/LLM opts. Add `--date-shift`/`--shift-window`/`--shift-subject-col`
+  and `--ft-min-conf` (batch has no interactive review, so batch redaction uses
+  the confidence threshold + per-type policy, not per-span accept).
+
+### `app/R/deidentify.R` (modify)
+
+- `se_shift_date(x, key, salt, subject_id = NULL, window = 365L)` — parse dates
+  (reuse the `se_generalize_date` parse formats), compute a keyed per-subject day
+  offset via the `openssl::sha256(msg, key=)` HMAC primitive from `crypto.R`,
+  apply it, re-emit in ISO `%Y-%m-%d`; unparseable
+  values → `[DATE]` tag (never leak). Pure, unit-testable.
+- Extend the `generalize` branch of `se_deidentify_table` with
+  `else if (meth == "date_shift") se_shift_date(orig, key, salt,
+  subject_id_vals, opts$shift_window %||% 365L)`, where `subject_id_vals` is the
+  named subject column (or `NULL`). Record original↔shifted in `crosswalk`
+  (treat `date_shift` as a reversible action alongside `pseudonymize`/`fpe`).
+- `se_redact_freetext_spans(text, spans)` — redact a single cell using a supplied
+  span set (already filtered to accepted + threshold), right-to-left by offset,
+  same tag/`postal`-mask rules as `se_redact_freetext_value`. The blind
+  `se_redact_freetext_value` is retained as the fallback when no findings are
+  passed (e.g. ad-hoc redaction with no project/review).
+- `se_deidentify_table(df, policy, key, detectors, findings = NULL)` — new
+  optional `findings` arg (the accepted spans). For `redact_freetext` columns,
+  route each cell through `se_redact_freetext_spans` using that cell's accepted
+  spans when `findings` is supplied; else fall back to the current re-scan.
 
 ### Packaging (modify)
 
@@ -183,6 +279,14 @@ span by higher confidence).
   PASS; a new PF smoke (load model, scan a sentence, assert PERSON/EMAIL spans),
   offline, from a `Downloads` extraction.
 - `testServer` for the Detection tab PF toggle.
+- `se_shift_date`: same subject → same offset; interval between two of a subject's
+  dates is unchanged after shifting; different scope keys give different offsets;
+  crosswalk round-trips shifted → original; unparseable → `[DATE]`.
+- `se_redact_freetext_spans`: redacts only the passed spans (a rejected span
+  survives; an accepted one is tagged); below-threshold spans are excluded;
+  overlapping spans handled; offsets stay valid (right-to-left).
+- Over-redaction guard: a PF span the reviewer rejects does **not** appear in the
+  de-identified output; a name PF finds and the reviewer accepts **does**.
 - Ad-hoc self-tests live in the scratchpad; the repo commits no tests.
 
 ## Risks / open items

@@ -123,11 +123,24 @@ ui <- page_navbar(
                        class = "btn-outline-secondary ms-2"),
           span(textOutput("py_status", inline = TRUE), class = "text-muted ms-3")),
       div(class = "mt-2",
-        checkboxInput("use_ner",
-          "Use offline NER (Presidio/spaCy) on free text", value = FALSE),
-        checkboxInput("use_llm",
-          "Use a local LLM (llama.cpp / Ollama) for ambiguous free text — off by default",
-          value = FALSE)),
+        checkboxInput("use_pf",
+          "Enable Privacy Filter (free-text PII) — recommended", value = TRUE),
+        sliderInput("ft_min_conf", "Redaction confidence threshold",
+          min = 0.1, max = 0.99, value = 0.5, step = 0.05),
+        # Types are the detector `type` vocabulary (detect_r.R) UNION the PF types
+        # (name, address, secret). ALL selected by default so nothing is silently
+        # left un-redacted; UNCHECK a type to stop redacting it.
+        checkboxGroupInput("ft_types", "Redact these free-text types",
+          choices = c("name","address","email","phone","date","postal",
+                      "nric","passport","mrn","ip","url","account","secret"),
+          selected = c("name","address","email","phone","date","postal",
+                       "nric","passport","mrn","ip","url","account","secret"),
+          inline = TRUE),
+        tags$details(tags$summary("Advanced / optional backends"),
+          checkboxInput("use_ner",
+            "Use Presidio/spaCy NER (needs the separately-bundled model)", value = FALSE),
+          checkboxInput("use_llm",
+            "Use a local LLM (llama.cpp / Ollama) — off by default", value = FALSE))),
       div(class="small text-muted mt-1",
           "Rules + validators (NRIC checksum, phone, email, dates) and column ",
           "profiling always run with zero Python. Offline NER and the local LLM ",
@@ -140,6 +153,10 @@ ui <- page_navbar(
       card(card_header("Misplaced / outlier values (review these first)"),
         DTOutput("outliers")),
       card(card_header("Free-text PII found in notes-like columns"),
+        div(class = "small text-muted mb-1",
+            "Select any row to EXCLUDE that value from redaction (reject). ",
+            "Everything shown at or above the confidence threshold, and of a ",
+            "selected type, will be redacted; the reviewer sees the diff before release."),
         DTOutput("freetext_findings")))
   ),
 
@@ -148,6 +165,14 @@ ui <- page_navbar(
     card(card_header("Per-column de-identification policy"),
       div(actionButton("btn_autosuggest", "Auto-suggest mapping"),
           actionButton("btn_save_policy", "Save policy", class = "btn-primary")),
+      div(class = "mt-2 p-2 border rounded",
+        tags$b("Date handling (applies to columns whose action is Generalize on a date/DOB)"),
+        selectInput("date_method", "Date generalise method",
+          c("Year only" = "year", "Year-month (drop day)" = "year_month",
+            "Date-shift (keep intervals)" = "date_shift"), selected = "year"),
+        numericInput("shift_window", "Date-shift window (± days)", value = 365, min = 1),
+        selectInput("shift_subject_col", "Date-shift subject column (optional)",
+          choices = c("(dataset-wide)" = ""), selected = "")),
       div(class="small text-muted mt-2",
           "Pick the identifier and action for each column. FPE is optional; ",
           "the default for IDs is a keyed pseudonym token."),
@@ -304,7 +329,8 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
-                       findings = NULL, profile = NULL, suggestion = NULL,
+                       findings = NULL, ft_rejects = character(0),
+                       profile = NULL, suggestion = NULL,
                        userkey = NULL, doc = NULL, cert = NULL,
                        sdc_treated = NULL, sdc_steps = NULL, batch = NULL)
 
@@ -393,6 +419,7 @@ server <- function(input, output, session) {
       rv$profile <- rv$suggestion$profile
       # free-text findings on likely note columns: rules always, NER/LLM opt-in
       ff <- se_detect_freetext(rv$df,
+              use_pf = isTRUE(input$use_pf),
               use_ner = isTRUE(input$use_ner), use_llm = isTRUE(input$use_llm))
       rv$findings <- if (nrow(ff)) ff else NULL
     })
@@ -400,6 +427,7 @@ server <- function(input, output, session) {
       se_audit_append(se_project_paths(rv$proj$dir)$audit, "detect", input$actor,
                       list(outliers = nrow(rv$profile$outliers),
                            freetext = if (is.null(rv$findings)) 0L else nrow(rv$findings),
+                           pf = isTRUE(input$use_pf),
                            ner = isTRUE(input$use_ner), llm = isTRUE(input$use_llm)))
   })
 
@@ -412,11 +440,24 @@ server <- function(input, output, session) {
                                                c("#f8d7da", "#fff3cd")))
   })
   output$freetext_findings <- renderDT({
-    if (is.null(rv$findings)) return(datatable(data.frame(message="Run detection.")))
-    datatable(rv$findings, options = list(scrollX = TRUE, pageLength = 10), rownames = FALSE)
+    if (is.null(rv$findings)) return(datatable(data.frame(message = "Run detection.")))
+    datatable(rv$findings, selection = "multiple",
+              options = list(scrollX = TRUE, pageLength = 10), rownames = FALSE)
+  })
+
+  observeEvent(input$freetext_findings_rows_selected, ignoreNULL = FALSE, {
+    sel <- input$freetext_findings_rows_selected
+    if (is.null(rv$findings) || is.null(sel) || !length(sel)) { rv$ft_rejects <- character(0); return() }
+    f <- rv$findings[sel, , drop = FALSE]
+    rv$ft_rejects <- paste(f$column, f$type, tolower(f$match), sep = "\t")
   })
 
   # ---- policy ----
+  observeEvent(rv$df, {
+    updateSelectInput(session, "shift_subject_col",
+      choices = c("(dataset-wide)" = "", stats::setNames(names(rv$df), names(rv$df))))
+  })
+
   observeEvent(input$btn_autosuggest, {
     req(rv$df)
     if (is.null(rv$suggestion)) rv$suggestion <- se_suggest_mapping(rv$df)
@@ -451,11 +492,22 @@ server <- function(input, output, session) {
       ident <- input[[paste0("ident_", cn)]] %||% "keep"
       act <- input[[paste0("act_", cn)]] %||% "keep"
       if (act == "redact_freetext") ftcols <- c(ftcols, cn)
-      cols[[cn]] <- list(identifier = if (ident=="keep") NA else ident, action = act,
-                         options = list(fpe_mode = se_identifier(ident)$fpe_mode,
-                                        generalize = se_identifier(ident)$generalize))
+      opts <- list(fpe_mode = se_identifier(ident)$fpe_mode,
+                   generalize = if (act == "generalize") input$date_method
+                                else se_identifier(ident)$generalize)
+      if (identical(input$date_method, "date_shift")) {
+        opts$shift_window <- as.integer(input$shift_window %||% 365L)
+        opts$shift_subject_col <- input$shift_subject_col %||% ""
+      }
+      cols[[cn]] <- list(identifier = if (ident=="keep") NA else ident,
+                         action = act, options = opts)
     }
-    list(columns = cols, freetext_columns = ftcols)
+    types_sel <- input$ft_types %||% NULL
+    freetext_opts <- list(use_pf = isTRUE(input$use_pf),
+                          min_conf = as.numeric(input$ft_min_conf %||% 0.5),
+                          types = types_sel,
+                          rejects = rv$ft_rejects %||% character(0))
+    list(columns = cols, freetext_columns = ftcols, freetext_opts = freetext_opts)
   }
 
   observeEvent(input$btn_save_policy, {

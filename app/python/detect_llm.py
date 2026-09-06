@@ -74,6 +74,8 @@ _LLAMA_SYS = (
     "{\"i\":int,\"text\":str,\"type\":str} (no prose, no code fences). \"text\" "
     "MUST be copied verbatim from the matching input string. \"type\" is one of: "
     + _TYPES + ". Output [] only if there is truly no personal data. "
+    "Output COMPACT JSON on a single line with no extra whitespace, no newlines "
+    "and no indentation. "
     "Example: inputs = [\"Call Mary Lee at 61234567\"] -> "
     "[{\"i\":0,\"text\":\"Mary Lee\",\"type\":\"name\"},"
     "{\"i\":0,\"text\":\"61234567\",\"type\":\"phone\"}]"
@@ -84,35 +86,64 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _parse_spans(content: str):
-    """Return the LAST top-level JSON array in the reply that decodes to a list.
+    """Salvage every complete span OBJECT ({...}) from the model reply.
 
-    llama.cpp's conversation UI echoes the prompt (which itself contains a JSON
-    array of the inputs) and wraps text in ANSI colour codes, so a naive
-    first-bracket-to-last-bracket match fails. We strip ANSI, then scan for
-    balanced top-level [...] arrays and keep the last one that json-decodes — the
-    model's completion comes last, after any echoed input array."""
+    Rather than extract one big `[...]` array, we collect each balanced top-level
+    JSON object that decodes to a dict carrying a span key ("text" for the
+    llama.cpp contract, "start" for the Ollama one). This is deliberately robust
+    to how small models actually format output:
+
+      * **Pretty-printed vs compact.** MediPhi pretty-prints (newlines + indent),
+        which inflates the token count; Qwen emits compact one-liners. Object
+        scanning ignores whitespace entirely.
+      * **Truncation.** If the completion is cut off at `n_predict` mid-array (no
+        closing `]`), every object generated *before* the cut is still salvaged —
+        the pass degrades to partial recall instead of silently returning zero
+        (the earlier array-only parser fell back to the echoed input array and
+        yielded nothing at large batch sizes).
+      * **Echoed prompt / multiple arrays.** llama.cpp's conversation UI echoes
+        `inputs = ["..."]` (bare strings — no objects) and wraps text in ANSI
+        colour codes; both are ignored here. ANSI is stripped first.
+
+    A tiny JSON string-state machine keeps braces that appear *inside* string
+    values (e.g. a note containing "{") from throwing off brace depth. Spurious
+    objects are self-cleaning downstream: the llama.cpp path keeps only spans
+    whose "text" is a verbatim substring of an input, and the Ollama path only
+    those whose offsets fall inside the text."""
     if not content:
         return []
     text = _ANSI.sub("", content)
-    best = []
+    spans = []
     depth = 0
     start = -1
+    in_str = False
+    esc = False
     for idx, ch in enumerate(text):
-        if ch == "[":
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
             if depth == 0:
                 start = idx
             depth += 1
-        elif ch == "]" and depth > 0:
+        elif ch == "}" and depth > 0:
             depth -= 1
             if depth == 0 and start >= 0:
                 try:
-                    data = json.loads(text[start:idx + 1])
-                    if isinstance(data, list):
-                        best = data
+                    obj = json.loads(text[start:idx + 1])
+                    if isinstance(obj, dict) and ("text" in obj or "start" in obj):
+                        spans.append(obj)
                 except Exception:
                     pass
                 start = -1
-    return best
+    return spans
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +327,7 @@ def _scan_ollama(texts: List[str], model: str,
 def llm_scan(texts: List[str], model: str = "",
              url: str = "http://127.0.0.1:11434", backend: str = "",
              llama_bin: str = "", model_path: str = "",
-             n_predict: int = 512, ctx: int = 4096,
+             n_predict: int = 1024, ctx: int = 4096,
              batch: int = 16) -> List[Dict[str, Any]]:
     """Scan a list of strings with the chosen local backend. Keys per span:
     row (1-based), start, end, match, type, identifier, detector, confidence.
@@ -309,3 +340,54 @@ def llm_scan(texts: List[str], model: str = "",
     if backend == "ollama":
         return _scan_ollama(texts, model, url)
     return []
+
+
+# ---------------------------------------------------------------------------
+# Headless self-test for the reply parser — no model / binary / network needed,
+# so it runs anywhere (and is immune to the AV that quarantines the unsigned
+# llama binary on the staging box). Run:  python app/python/detect_llm.py
+# Guards the span-object salvage against real small-model output shapes.
+# ---------------------------------------------------------------------------
+
+def _selftest() -> int:
+    ESC = "\x1b[0m"; GRN = "\x1b[1m\x1b[32m"
+    cases = [
+        # (label, raw reply, expected number of salvaged span objects)
+        # Qwen-style COMPACT one-liner, with the echoed prompt + ANSI colour codes
+        ("qwen-compact",
+         "\n" + GRN + "\n> inputs = [\"John Tan seen\", \"Mary Goh 9123 4567\"]\n" + ESC +
+         "[{\"i\":0,\"text\":\"John Tan\",\"type\":\"name\"},"
+         "{\"i\":1,\"text\":\"Mary Goh\",\"type\":\"name\"},"
+         "{\"i\":1,\"text\":\"9123 4567\",\"type\":\"phone\"}]\n", 3),
+        # MediPhi-style PRETTY-PRINTED complete array (newlines + indentation)
+        ("mediphi-pretty",
+         "> inputs = [\"...\"]\n[\n"
+         "  {\"i\":0,\"text\":\"John Tan\",\"type\":\"name\"},\n"
+         "  {\"i\":0,\"text\":\"Sarah Lim\",\"type\":\"name\"},\n"
+         "  {\"i\":1,\"text\":\"Mary Goh\",\"type\":\"name\"},\n"
+         "  {\"i\":1,\"text\":\"9123 4567\",\"type\":\"phone\"}\n]\n", 4),
+        # TRUNCATED pretty array (cut mid-object, no closing ]) -> salvage complete
+        ("truncated-salvage",
+         "[\n  {\"i\":0,\"text\":\"John Tan\",\"type\":\"name\"},\n"
+         "  {\"i\":1,\"text\":\"Mary Goh\",\"type\":\"name\"},\n"
+         "  {\"i\":2,\"text\":\"Ahmad bin Ism", 2),
+        # Echoed inputs ONLY (completion never produced) -> no dict objects -> []
+        ("echoed-only",
+         "> inputs = [\"John Tan seen\", \"Mary Goh 9123 4567\"]\n", 0),
+        # A brace INSIDE a string value must not break brace-depth tracking
+        ("brace-in-string",
+         "[{\"i\":0,\"text\":\"weird {name} here\",\"type\":\"name\"}]", 1),
+    ]
+    fails = 0
+    for label, raw, exp in cases:
+        got = len(_parse_spans(raw))
+        ok = got == exp
+        fails += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {label:18s} expected {exp}, got {got}")
+    print("parser self-test:", "OK" if not fails else f"{fails} FAILED")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.exit(_selftest())

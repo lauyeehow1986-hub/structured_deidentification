@@ -142,7 +142,10 @@ se_ollama_config <- function() {
 #' llama.cpp binary + GGUF model, discovered passively (file existence only).
 #' Binary: options(se.llamacpp_bin) / SE_LLAMACPP_BIN, else <bundle>/bin/llama/.
 #' Model:  options(se.llamacpp_model) / SE_LLAMACPP_MODEL, else the single .gguf
-#'         under <bundle>/models/llm/ (a qwen2.5-3b file wins if several exist).
+#'         under <bundle>/models/llm/. If several exist, preference order is
+#'         MediPhi-Instruct (the recommended MEDICAL default — extraction-tuned,
+#'         MIT, best free-text NAME recall in the A/B; see docs/ner_packaging.md)
+#'         then Qwen2.5-3B (the license-clean generalist fallback).
 se_llamacpp_config <- function() {
   root <- se_bundle_root()
   bin <- getOption("se.llamacpp_bin", Sys.getenv("SE_LLAMACPP_BIN", ""))
@@ -163,8 +166,15 @@ se_llamacpp_config <- function() {
     if (length(g) == 1L) {
       model <- g[1]
     } else if (length(g) > 1L) {
-      pref <- g[grepl("qwen2\\.5-3b", tolower(basename(g)))]
-      model <- if (length(pref)) pref[1] else ""   # ambiguous -> require choice
+      # ordered preference when several are bundled: MediPhi (medical default)
+      # then Qwen2.5-3B (generalist fallback); else ambiguous -> require choice.
+      bn <- tolower(basename(g))
+      pick <- ""
+      for (pat in c("mediphi", "qwen2\\.5-3b", "qwen")) {
+        hit <- g[grepl(pat, bn)]
+        if (length(hit)) { pick <- hit[1]; break }
+      }
+      model <- pick
     }
   }
   list(bin = bin, model = model)
@@ -201,7 +211,11 @@ se_llm_scan <- function(texts) {
         return(.se_empty_ner())
       list(texts = as.character(texts), backend = "llamacpp",
            llama_bin = cfg$llama_bin, model_path = cfg$model_path,
-           n_predict = getOption("se.llm_n_predict", 512L),
+           # 1024 (not 512) so a batch's JSON completion doesn't truncate: a
+           # medical SLM like MediPhi pretty-prints its output, inflating the
+           # token count. The salvage parser tolerates any overflow, but the
+           # headroom lets a typical free-text batch finish in one pass.
+           n_predict = getOption("se.llm_n_predict", 1024L),
            ctx = getOption("se.llm_ctx", 4096L),
            batch = getOption("se.llm_batch", 16L))
     },

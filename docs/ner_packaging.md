@@ -9,7 +9,8 @@ the **optional** free-text engines:
   locations and other entities buried in notes.
 - **Optional local LLM** — a small local model for ambiguous free text, off by
   default. Preferred backend is a **socket-free bundled llama.cpp** (recommended
-  model: Qwen2.5-3B-Instruct Q4_K_M); a local Ollama is an alternative. See §2.
+  model: **MediPhi-Instruct Q4_K_M**, the medical default; Qwen2.5-3B-Instruct
+  Q4_K_M is the generalist fallback); a local Ollama is an alternative. See §2.
 
 Both are bundled on an **internet-connected staging machine**, then copied to
 the locked-down box. **The locked-down box never downloads anything** — the app
@@ -137,26 +138,70 @@ Two files make it work, both **auto-discovered** by file existence — no config
 2. **The model** → `<bundle>/models/llm/<one>.gguf`. Drop a single GGUF in that
    folder; if exactly one is present it is used automatically.
 
-   **Recommended model: Qwen2.5-3B-Instruct, Q4_K_M** (~2 GB, **Apache-2.0** —
-   clean for a governance tool, and strong at structured JSON extraction). On
-   the staging machine:
+   **Recommended (medical default): MediPhi-Instruct, Q4_K_M** (~2.4 GB, **MIT**
+   — clean for redistribution). MediPhi is a Phi-3.5-mini SLM tuned by Microsoft
+   for clinical **information extraction / NER** — the same shape as PII
+   span-tagging — so it is the strongest of the small models at the one thing the
+   LLM pass actually adds over the deterministic rules: **names buried in free
+   text**. On the staging machine:
+
+   ```bash
+   curl -L -o models/llm/mediphi-instruct-q4_k_m.gguf \
+     https://huggingface.co/mradermacher/MediPhi-Instruct-GGUF/resolve/main/MediPhi-Instruct.Q4_K_M.gguf
+   ```
+
+   **Generalist fallback: Qwen2.5-3B-Instruct, Q4_K_M** (~2.1 GB, **Apache-2.0**,
+   strong JSON adherence, slightly faster). Keep it as the license-clean
+   general-purpose option — or if a deployment cannot use the medical model for
+   any reason:
 
    ```bash
    curl -L -o models/llm/qwen2.5-3b-instruct-q4_k_m.gguf \
      https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf
    ```
 
-   For more recall on a box with RAM to spare, use **Qwen2.5-7B-Instruct
-   Q4_K_M** (~4.7 GB, also Apache-2.0) instead — same folder, still
-   auto-detected. Keep total RAM in mind: 16 GB is shared with Windows + R +
-   the resident spaCy model, so a 3B/7B **Q4** is the safe ceiling. If you
-   bundle several GGUFs, a `qwen2.5-3b*` file wins; otherwise point the app at
-   one explicitly with `options(se.llamacpp_model = "…")` / `SE_LLAMACPP_MODEL`.
+   Keep total RAM in mind: 16 GB is shared with Windows + R + the resident spaCy
+   model, so a 3B/3.8B **Q4** is the safe ceiling. **If you bundle several GGUFs**
+   the preference order is `mediphi*` → `qwen2.5-3b*` → `qwen*`; otherwise point
+   the app at one explicitly with `options(se.llamacpp_model = "…")` /
+   `SE_LLAMACPP_MODEL`.
+
+   > **Why MediPhi is the default — the A/B.** Both models were run in isolation
+   > (LLM pass only, no rules/NER) over a synthetic gold set of 20 clinical-style
+   > free-text notes (30 planted PII spans across names/phone/NRIC/email/date/
+   > address/postal + 4 negative-control notes), scored by span-overlap:
+   >
+   > | model | recall | precision | span-F1 | name recall | FP on negatives |
+   > |---|---|---|---|---|---|
+   > | **MediPhi-Instruct** | **0.80** | 1.00 | **0.889** | **0.71** | 0 |
+   > | Qwen2.5-3B | 0.77 | 1.00 | 0.868 | 0.57 | 0 |
+   >
+   > Both have **perfect precision and zero over-flagging** on the negative
+   > controls — essential for a governance tool. The overall margin is one span,
+   > but the *shape* of the difference is what decides it: MediPhi is materially
+   > better at **names** (0.71 vs 0.57), which is exactly the LLM's job here, while
+   > Qwen's only wins were on NRIC/FIN and email — identifiers the deterministic
+   > rules (`detect_r.R`) already catch with 100% reliability, so MediPhi's
+   > weaknesses are fully covered in production. Qwen is ~40 % faster and stays the
+   > bundled generalist fallback.
+
+   > **Output-format note (baked into the code).** Small models format JSON
+   > differently: Qwen emits compact one-liners, **MediPhi pretty-prints**
+   > (newlines + indentation), which inflates the token count of a batch's reply.
+   > The reply parser (`_parse_spans` in `detect_llm.py`) therefore **salvages
+   > every complete `{…}` span object** rather than requiring one well-formed
+   > `[…]` array — so it is robust to pretty-printing, to a completion truncated at
+   > `n_predict` (it keeps the objects generated before the cut instead of
+   > returning nothing), and to the prompt echo. The shipped default
+   > `se.llm_n_predict` is **1024** (not 512) to give a pretty-printing model room
+   > to finish a batch. A headless regression test for the parser runs with no
+   > model or binary needed: `bin/python/python.exe app/python/detect_llm.py`.
 
 That's it — copy the whole bundle to the locked-down box and it runs. Override
 paths only if you stage them elsewhere: `options(se.llamacpp_bin = "…")` /
 `SE_LLAMACPP_BIN`. Tuning knobs (with defaults): `se.llm_batch` (16 cells per
-model load), `se.llm_ctx` (4096), `se.llm_n_predict` (512).
+model load), `se.llm_ctx` (4096), `se.llm_n_predict` (1024 — headroom for a
+pretty-printing model; see the output-format note in §2a).
 
 > **Antivirus may quarantine the binary — mainly on the staging box.** A freshly
 > downloaded, unsigned `llama*.exe` is often silently deleted by AV (AVG / McAfee

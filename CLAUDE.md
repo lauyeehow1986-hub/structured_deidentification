@@ -23,9 +23,11 @@ controller remains responsible for confirming adequacy of de-identification befo
   modes hard-disable outbound sockets, and Presidio is restricted to a spaCy-NER-only registry so
   its `tldextract`-backed email recognizer can't fetch the public-suffix list. The optional LLM
   second-opinion pass defaults to a **socket-free bundled llama.cpp** (a one-shot `llama-cli`
-  subprocess against an auto-discovered `models/llm/*.gguf` — recommended Qwen2.5-3B-Instruct
-  Q4_K_M; the `llm` runner mode disables sockets for every backend except a local loopback Ollama,
-  the one optional exception). Never call `reticulate::py_available(initialize=TRUE)` or anything
+  subprocess against an auto-discovered `models/llm/*.gguf` — medical default MediPhi-Instruct
+  Q4_K_M (MIT, extraction-tuned), Qwen2.5-3B-Instruct Q4_K_M (Apache-2.0) the generalist fallback;
+  multi-GGUF pick order `mediphi*`→`qwen2.5-3b*`→`qwen*`, see docs/ner_packaging.md; the `llm`
+  runner mode disables sockets for every backend except a local loopback Ollama, the one optional
+  exception). Never call `reticulate::py_available(initialize=TRUE)` or anything
   that triggers uv/pip provisioning.
 - **Portable projects:** all project state lives in one self-contained folder on the data drive
   (see `app/R/project.R`), so a job can be unplugged and resumed on another machine.

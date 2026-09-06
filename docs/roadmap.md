@@ -37,8 +37,10 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Optional local **LLM pass** for ambiguous free text, **off by default**, two backends
   (`app/python/detect_llm.py`, `se_llm_scan` / `se_llm_config`). Default is a **socket-free
   bundled llama.cpp** — a one-shot `llama-cli` subprocess against an auto-discovered
-  `bin/llama/` binary + a single `models/llm/*.gguf` (recommended **Qwen2.5-3B-Instruct Q4_K_M**,
-  Apache-2.0, ~2 GB, fits a 16 GB CPU box); zero-config "drop it in the bundle and it runs". The
+  `bin/llama/` binary + a single `models/llm/*.gguf` (medical default **MediPhi-Instruct Q4_K_M**,
+  MIT, ~2.4 GB — extraction-tuned, best free-text name recall in the A/B; **Qwen2.5-3B-Instruct
+  Q4_K_M**, Apache-2.0, ~2.1 GB is the generalist fallback; both fit a 16 GB CPU box); zero-config
+  "drop it in the bundle and it runs". The
   runner disables outbound sockets for the llama.cpp backend too — only the alternative **Ollama**
   backend is allowed a loopback socket to a local service the operator chose to run. Findings are
   labelled hints (`llm:llamacpp` / `llm:ollama`, confidence ~0.6), never ground truth. Verified

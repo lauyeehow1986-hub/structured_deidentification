@@ -83,11 +83,30 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
 - ✅ Role gating (de-identifier vs reviewer), side-by-side original↔de-identified review,
   approve/return, audit viewer + chain verification, manifest viewer.
 
-## Phase 5 — SDC (opt-in) ✅ core / ⬜ transforms UI
+## Phase 5 — SDC (opt-in) ✅
 - ✅ k-anonymity, l-diversity, sample uniques (SUDA-lite), individual risk (sdcMicro), linkage
   **DCR**, and a hard **export gate** (`app/R/sdc.R`). All opt-in.
-- ⬜ Interactive risk-reduction transforms (suppression, global recode, top/bottom coding,
-  microaggregation, PRAM, noise); differential-privacy + synthetic-data (flexsynth) options.
+- ✅ **Interactive risk-reduction transforms** (`app/R/sdc_transforms.R`), all opt-in, wired
+  into the Disclosure-control tab with a **Preview → Apply → measure** loop: each transform
+  shows its effect on k-anonymity *before* you commit, then stacks onto a treated copy of the
+  working table; the measures and export gate re-run on the treated table, and it downloads as
+  CSV (logged to the audit trail as `sdc_transform` / `sdc_export_treated`). Transforms:
+  - **Local suppression** — blanks the quasi cells of every below-k record to force k-anonymity.
+  - **Global recode / banding** — numeric → bands (break points + labels); categorical → mapping.
+  - **Top / bottom coding** — caps extreme (identifying) values at a percentile or absolute cut.
+  - **Microaggregation** — individual-ranking groups of ≥ *aggr*, replaced by group mean/median
+    (short tail merged so no singleton; integer columns rounded back).
+  - **PRAM** — post-randomisation: keep each categorical value with prob *p*, else redraw from
+    the column marginal; reproducible by seed.
+  - **Noise addition** — Gaussian (fraction of SD) or **Laplace / DP-style** (clamp to a range
+    and calibrate scale to ε); integer columns rounded, reproducible by seed.
+  - **Synthetic replacement** — pure-R independent-marginal resynthesis (breaks the joint quasi
+    combination); uses the author's **flexsynth** for joint-preserving synthesis when installed,
+    otherwise falls back to marginal with a note.
+  Transforms operate on the same bounded working sample as the measures (so treated rows stay
+  row-aligned with the original for DCR); on a large output this is analysis-only and clearly
+  labelled. Headless + `testServer` suites cover every transform, reproducibility, the
+  Preview/Apply/Reset/measure wiring, and that a treatment can drive the gate to PASS.
 
 ## Phase 6 — Signed handoff + certificate + reports ✅ core / ⬜ PDF report
 - ✅ Per-user signature on each stage; export/import signed project bundle (`.zip`); signed

@@ -197,7 +197,33 @@ ui <- page_navbar(
         selected = c("kanon")),
       numericInput("sdc_k", "Target k", value = 5, min = 2, width = "150px"),
       actionButton("btn_sdc", "Run selected measures", class = "btn-primary"),
-      verbatimTextOutput("sdc_out"))
+      div(class = "small text-muted mt-1",
+          "Measures (and the export gate) run on the treated table once you apply transforms below."),
+      verbatimTextOutput("sdc_out")),
+
+    card(card_header("Risk-reduction transforms (opt-in)"),
+      p(class = "small text-muted",
+        "Coarsen or perturb the quasi-identifiers to raise k / cut uniques, at a stated ",
+        "cost to utility. Preview shows the effect on k before you commit; Apply stacks the ",
+        "transform onto a treated copy. Transforms act on the working table (a bounded sample ",
+        "when the output is large — analysis-only in that case)."),
+      layout_columns(col_widths = c(4, 8),
+        selectInput("sdc_tx", "Transform",
+          c("Local suppression (force k)" = "suppress",
+            "Global recode / banding"     = "recode",
+            "Top / bottom coding"         = "topbottom",
+            "Microaggregation"            = "microaggregate",
+            "PRAM (post-randomisation)"   = "pram",
+            "Noise addition (incl. DP-Laplace)" = "noise",
+            "Synthetic replacement"       = "synth")),
+        uiOutput("sdc_tx_params")),
+      div(
+        actionButton("btn_sdc_preview", "Preview effect", class = "btn-outline-primary"),
+        actionButton("btn_sdc_apply", "Apply to treated table", class = "btn-primary ms-1"),
+        actionButton("btn_sdc_reset", "Reset treatments", class = "btn-outline-secondary ms-1"),
+        downloadButton("dl_sdc", "Download treated table", class = "btn-outline-success ms-1")),
+      verbatimTextOutput("sdc_tx_out"),
+      uiOutput("sdc_treated_note"))
   ),
 
   # 8. AUDIT
@@ -258,7 +284,8 @@ ui <- page_navbar(
 server <- function(input, output, session) {
   rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
                        findings = NULL, profile = NULL, suggestion = NULL,
-                       userkey = NULL, doc = NULL)
+                       userkey = NULL, doc = NULL,
+                       sdc_treated = NULL, sdc_steps = NULL)
 
   # Re-render after an explicit probe so the operator sees the new status.
   output$py_status <- renderText({ input$btn_enable_ner; se_py_status_text() })
@@ -564,21 +591,33 @@ server <- function(input, output, session) {
     selectInput("sdc_quasi", "Quasi-identifier columns", names(rv$df),
                 multiple = TRUE, width = "100%")
   })
+
+  # Bounded, representative working sample of the current output (or input).
+  # Both the measures and the transforms operate on this same sample so treated
+  # rows stay aligned with the original for DCR.
+  .sdc_sample <- reactive({
+    cap <- getOption("se.sdc_sample_cap", 20000L)
+    if (!is.null(rv$deid)) se_sample_table(rv$deid$reader, max_rows = cap)
+    else { req(rv$df); se_sample_table(se_reader_from_df(rv$df), max_rows = cap) }
+  })
+  # The table transforms act on: the accumulated treated copy if any, else the
+  # working sample.
+  .sdc_work <- reactive({
+    if (!is.null(rv$sdc_treated)) rv$sdc_treated else .sdc_sample()$data
+  })
+
   observeEvent(input$btn_sdc, {
     req(input$sdc_quasi)
-    cap <- getOption("se.sdc_sample_cap", 20000L)
     steps <- input$sdc_steps
-    # Analyse a bounded, representative sample rather than the whole output.
-    if (!is.null(rv$deid)) {
-      samp <- se_sample_table(rv$deid$reader, max_rows = cap)
-      ref  <- if ("dcr" %in% steps && !is.null(rv$deid$src_reader))
-                se_read_blocks(rv$deid$src_reader, samp$blocks) else NULL
-    } else {
-      req(rv$df)
-      samp <- se_sample_table(se_reader_from_df(rv$df), max_rows = cap); ref <- NULL
-    }
-    d <- samp$data
+    samp  <- .sdc_sample()
+    treated <- !is.null(rv$sdc_treated)
+    d <- if (treated) rv$sdc_treated else samp$data
+    ref <- if ("dcr" %in% steps && !is.null(rv$deid) && !is.null(rv$deid$src_reader))
+             se_read_blocks(rv$deid$src_reader, samp$blocks) else NULL
     out <- c()
+    if (treated)
+      out <- c(out, sprintf("Measured on the TREATED table (%d transform step(s) applied).",
+                            length(rv$sdc_steps)), "")
     if (isTRUE(samp$sampled))
       out <- c(out, sprintf("NOTE: estimated from a random sample of %s of %s rows.",
                             format(samp$n, big.mark = ","),
@@ -604,7 +643,7 @@ server <- function(input, output, session) {
                                               ir$risk_mean, ir$risk_max, ir$expected_reident))
       else out <- c(out, "individual risk: sdcMicro unavailable/failed.")
     }
-    if ("dcr" %in% steps && !is.null(rv$deid) && !is.null(ref)) {
+    if ("dcr" %in% steps && !is.null(ref) && nrow(ref) == nrow(d)) {
       dc <- se_dcr(d, ref, input$sdc_quasi)
       if (!is.null(dc)) out <- c(out, sprintf("DCR vs original: min=%.3f mean=%.3f exact-matches=%.1f%%",
                                               dc$dcr_min, dc$dcr_mean, 100*dc$frac_zero))
@@ -618,10 +657,215 @@ server <- function(input, output, session) {
     output$sdc_out <- renderText(paste(out, collapse = "\n"))
     if (!is.null(rv$proj))
       se_audit_append(se_project_paths(rv$proj$dir)$audit, "sdc_run", input$actor,
-                      list(steps = steps, gate_pass = gate$pass,
+                      list(steps = steps, gate_pass = gate$pass, treated = treated,
+                           n_transforms = length(rv$sdc_steps),
                            sampled = isTRUE(samp$sampled), sample_n = samp$n,
                            nrec = samp$nrec))
   })
+
+  # ---- SDC risk-reduction transforms ----
+  # Column choices come from the working table (treated copy or sample).
+  .sdc_cols <- reactive({ names(.sdc_work()) })
+
+  output$sdc_tx_params <- renderUI({
+    cols <- tryCatch(.sdc_cols(), error = function(e) character(0))
+    quasi <- input$sdc_quasi
+    numdefault <- if (length(quasi)) quasi else cols
+    switch(input$sdc_tx %||% "suppress",
+      suppress = tagList(
+        div(class = "small text-muted",
+            "Blanks the quasi-identifier cells of every record in a group smaller than ",
+            "Target k (set above). Optionally restrict to specific columns."),
+        selectInput("sdc_sup_cols", "Columns to blank (default: all quasi)",
+                    choices = cols, selected = quasi, multiple = TRUE, width = "100%")),
+      recode = tagList(
+        selectInput("sdc_rc_col", "Column", choices = cols, width = "60%"),
+        radioButtons("sdc_rc_mode", NULL,
+                     c("Numeric bands" = "bands", "Categorical mapping" = "map"), inline = TRUE),
+        conditionalPanel("input.sdc_rc_mode == 'bands'",
+          textInput("sdc_rc_breaks", "Break points (comma-separated)", "0,30,50,70,120"),
+          textInput("sdc_rc_labels", "Labels (optional, comma-separated)", "<30,30-49,50-69,70+")),
+        conditionalPanel("input.sdc_rc_mode == 'map'",
+          textInput("sdc_rc_map", "Mapping  old=new, old2=new2", "Malay=Minority, Indian=Minority"))),
+      topbottom = tagList(
+        selectInput("sdc_tb_col", "Numeric column", choices = cols, width = "60%"),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("sdc_tb_top", "Cap top percentile (0 = off)", value = 0.01, min = 0, max = 0.5, step = 0.01),
+          numericInput("sdc_tb_bot", "Cap bottom percentile (0 = off)", value = 0.01, min = 0, max = 0.5, step = 0.01))),
+      microaggregate = tagList(
+        selectInput("sdc_ma_cols", "Numeric columns", choices = cols, selected = NULL, multiple = TRUE, width = "100%"),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("sdc_ma_aggr", "Group size (>= k)", value = 5, min = 2, step = 1),
+          radioButtons("sdc_ma_method", "Replace with", c("mean", "median"), inline = TRUE))),
+      pram = tagList(
+        selectInput("sdc_pr_col", "Categorical column", choices = cols, width = "60%"),
+        layout_columns(col_widths = c(6, 6),
+          numericInput("sdc_pr_retain", "Retention probability", value = 0.8, min = 0, max = 1, step = 0.05),
+          numericInput("sdc_pr_seed", "Seed", value = 1, min = 1, step = 1))),
+      noise = tagList(
+        selectInput("sdc_no_cols", "Numeric columns", choices = cols, selected = NULL, multiple = TRUE, width = "100%"),
+        radioButtons("sdc_no_method", "Mechanism",
+                     c("Gaussian (% of SD)" = "gaussian", "Laplace / DP-style" = "laplace"), inline = TRUE),
+        conditionalPanel("input.sdc_no_method == 'gaussian'",
+          numericInput("sdc_no_pct", "Noise as fraction of SD", value = 0.1, min = 0, step = 0.05)),
+        conditionalPanel("input.sdc_no_method == 'laplace'",
+          layout_columns(col_widths = c(4, 4, 4),
+            numericInput("sdc_no_eps", "epsilon (0 = use %SD)", value = 1, min = 0, step = 0.1),
+            numericInput("sdc_no_lo", "clamp lower (blank = data min)", value = NA),
+            numericInput("sdc_no_hi", "clamp upper (blank = data max)", value = NA))),
+        numericInput("sdc_no_seed", "Seed", value = 1, min = 1, step = 1, width = "150px")),
+      synth = tagList(
+        selectInput("sdc_sy_cols", "Columns to synthesise (default: quasi)",
+                    choices = cols, selected = quasi, multiple = TRUE, width = "100%"),
+        radioButtons("sdc_sy_mode", "Method",
+          c("Independent marginal (pure R)" = "marginal",
+            "Joint (flexsynth, if installed)" = "flexsynth"), inline = TRUE),
+        div(class = "small text-muted",
+            if (se_sdc_synth_available()) "flexsynth detected: joint synthesis available."
+            else "flexsynth not installed: 'Joint' falls back to marginal resynthesis."),
+        numericInput("sdc_sy_seed", "Seed", value = 1, min = 1, step = 1, width = "150px")))
+  })
+
+  # Build a transform spec (list(op, args)) from the current inputs, or a
+  # character error string if the inputs are incomplete.
+  .sdc_build_step <- function() {
+    op <- input$sdc_tx %||% "suppress"
+    parse_nums <- function(s) {
+      v <- suppressWarnings(as.numeric(trimws(strsplit(s %||% "", ",")[[1]])))
+      v[!is.na(v)]
+    }
+    if (op == "suppress") {
+      req(input$sdc_quasi)
+      cols <- input$sdc_sup_cols; if (!length(cols)) cols <- NULL
+      list(op = "suppress", args = list(quasi_cols = input$sdc_quasi,
+                                        k = as.integer(input$sdc_k %||% 5L), cols = cols))
+    } else if (op == "recode") {
+      if (is.null(input$sdc_rc_col)) return("Choose a column.")
+      if ((input$sdc_rc_mode %||% "bands") == "bands") {
+        br <- parse_nums(input$sdc_rc_breaks)
+        if (length(br) < 2) return("Give at least two break points.")
+        lb <- trimws(strsplit(input$sdc_rc_labels %||% "", ",")[[1]]); lb <- lb[nzchar(lb)]
+        if (length(lb) != length(br) - 1L) lb <- NULL
+        list(op = "recode", args = list(col = input$sdc_rc_col, breaks = br, labels = lb))
+      } else {
+        pairs <- strsplit(trimws(strsplit(input$sdc_rc_map %||% "", ",")[[1]]), "=")
+        pairs <- pairs[vapply(pairs, length, 1L) == 2L]
+        if (!length(pairs)) return("Give mappings as old=new, comma-separated.")
+        mp <- setNames(trimws(vapply(pairs, `[`, "", 2L)), trimws(vapply(pairs, `[`, "", 1L)))
+        list(op = "recode", args = list(col = input$sdc_rc_col, mapping = mp))
+      }
+    } else if (op == "topbottom") {
+      if (is.null(input$sdc_tb_col)) return("Choose a column.")
+      tp <- if ((input$sdc_tb_top %||% 0) > 0) input$sdc_tb_top else NULL
+      bt <- if ((input$sdc_tb_bot %||% 0) > 0) input$sdc_tb_bot else NULL
+      if (is.null(tp) && is.null(bt)) return("Set a top and/or bottom percentile > 0.")
+      list(op = "topbottom", args = list(col = input$sdc_tb_col, top_pct = tp, bottom_pct = bt))
+    } else if (op == "microaggregate") {
+      if (!length(input$sdc_ma_cols)) return("Choose one or more numeric columns.")
+      list(op = "microaggregate", args = list(cols = input$sdc_ma_cols,
+           aggr = as.integer(input$sdc_ma_aggr %||% 5L), method = input$sdc_ma_method %||% "mean"))
+    } else if (op == "pram") {
+      if (is.null(input$sdc_pr_col)) return("Choose a column.")
+      list(op = "pram", args = list(col = input$sdc_pr_col,
+           retain = input$sdc_pr_retain %||% 0.8, seed = as.integer(input$sdc_pr_seed %||% 1L)))
+    } else if (op == "noise") {
+      if (!length(input$sdc_no_cols)) return("Choose one or more numeric columns.")
+      if ((input$sdc_no_method %||% "gaussian") == "gaussian") {
+        list(op = "noise", args = list(cols = input$sdc_no_cols, method = "gaussian",
+             pct = input$sdc_no_pct %||% 0.1, seed = as.integer(input$sdc_no_seed %||% 1L)))
+      } else {
+        eps <- input$sdc_no_eps %||% 0
+        lo <- if (is.na(input$sdc_no_lo)) NULL else input$sdc_no_lo
+        hi <- if (is.na(input$sdc_no_hi)) NULL else input$sdc_no_hi
+        list(op = "noise", args = list(cols = input$sdc_no_cols, method = "laplace",
+             epsilon = if (eps > 0) eps else NULL, lower = lo, upper = hi,
+             pct = 0.1, seed = as.integer(input$sdc_no_seed %||% 1L)))
+      }
+    } else if (op == "synth") {
+      cols <- input$sdc_sy_cols; if (!length(cols)) return("Choose columns to synthesise.")
+      if ((input$sdc_sy_mode %||% "marginal") == "flexsynth")
+        list(op = "synth_flexsynth", args = list(cols = cols, seed = as.integer(input$sdc_sy_seed %||% 1L)))
+      else
+        list(op = "synth", args = list(cols = cols, seed = as.integer(input$sdc_sy_seed %||% 1L)))
+    } else "Unknown transform."
+  }
+
+  # Run one step against a base table (handles the flexsynth op which is not in
+  # the se_sdc_apply dispatcher).
+  .sdc_run_step <- function(base, step) {
+    if (step$op == "synth_flexsynth")
+      do.call(se_sdc_synth_flexsynth, c(list(base), step$args))
+    else se_sdc_apply(base, list(step))  # returns list(data, log) for known ops
+  }
+
+  observeEvent(input$btn_sdc_preview, {
+    step <- .sdc_build_step()
+    if (is.character(step)) { output$sdc_tx_out <- renderText(step); return() }
+    base <- .sdc_work()
+    res <- .sdc_run_step(base, step)
+    treated <- if (!is.null(res$data)) res$data else base
+    note <- if (!is.null(res$note)) res$note else paste(res$log, collapse = "\n")
+    q <- input$sdc_quasi
+    lines <- c(paste0("PREVIEW — ", note))
+    if (length(q)) {
+      k0 <- se_kanon(base, q, input$sdc_k); k1 <- se_kanon(treated, q, input$sdc_k)
+      if (!is.null(k0) && !is.null(k1))
+        lines <- c(lines, "",
+          sprintf("k-anon  before: k=%d, below-k=%d, uniques=%d", k0$k_achieved, k0$n_below_k, k0$n_unique),
+          sprintf("k-anon  after : k=%d, below-k=%d, uniques=%d", k1$k_achieved, k1$n_below_k, k1$n_unique))
+    } else lines <- c(lines, "", "(select quasi-identifier columns above to see the k-anon effect)")
+    lines <- c(lines, "", "Not committed — click \"Apply to treated table\" to keep it.")
+    output$sdc_tx_out <- renderText(paste(lines, collapse = "\n"))
+  })
+
+  observeEvent(input$btn_sdc_apply, {
+    step <- .sdc_build_step()
+    if (is.character(step)) { output$sdc_tx_out <- renderText(step); return() }
+    base <- .sdc_work()
+    res <- .sdc_run_step(base, step)
+    treated <- if (!is.null(res$data)) res$data else base
+    note <- if (!is.null(res$note)) res$note else paste(res$log, collapse = "\n")
+    rv$sdc_treated <- treated
+    rv$sdc_steps <- c(rv$sdc_steps, list(list(step = step, note = note)))
+    if (!is.null(rv$proj))
+      se_audit_append(se_project_paths(rv$proj$dir)$audit, "sdc_transform", input$actor,
+                      list(op = step$op, note = note, step_index = length(rv$sdc_steps)))
+    log <- vapply(seq_along(rv$sdc_steps),
+                  function(i) sprintf("%d. %s", i, rv$sdc_steps[[i]]$note), character(1))
+    output$sdc_tx_out <- renderText(paste(c("Applied. Treatment so far:", "", log), collapse = "\n"))
+    showNotification("Transform applied to the treated table.", type = "message")
+  })
+
+  observeEvent(input$btn_sdc_reset, {
+    rv$sdc_treated <- NULL; rv$sdc_steps <- NULL
+    output$sdc_tx_out <- renderText("Treatments cleared — back to the untreated working table.")
+  })
+
+  output$sdc_treated_note <- renderUI({
+    if (is.null(rv$sdc_treated)) return(NULL)
+    samp <- tryCatch(.sdc_sample(), error = function(e) list(sampled = FALSE))
+    div(class = "small text-muted mt-2",
+        sprintf("Treated table holds %s row(s) with %d transform step(s). ",
+                format(nrow(rv$sdc_treated), big.mark = ","), length(rv$sdc_steps)),
+        if (isTRUE(samp$sampled))
+          "This is a bounded sample — analysis-only; download reflects the sample."
+        else "Download or re-run the measures above to confirm it clears the gate.")
+  })
+
+  output$dl_sdc <- downloadHandler(
+    filename = function() {
+      base <- if (!is.null(rv$proj)) rv$proj$name else "table"
+      sprintf("%s_sdc_treated.csv", base)
+    },
+    content = function(file) {
+      d <- rv$sdc_treated
+      if (is.null(d)) d <- .sdc_work()
+      utils::write.csv(d, file, row.names = FALSE, na = "")
+      if (!is.null(rv$proj))
+        se_audit_append(se_project_paths(rv$proj$dir)$audit, "sdc_export_treated", input$actor,
+                        list(rows = nrow(d), transforms = length(rv$sdc_steps)))
+    }
+  )
 
   # ---- audit ----
   output$audit_table <- renderDT({

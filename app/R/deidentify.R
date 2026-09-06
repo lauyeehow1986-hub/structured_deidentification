@@ -12,8 +12,41 @@
 
 # --- generalisation helpers --------------------------------------------------
 
+#' Parse a character/Date vector to Date, PER ELEMENT, across the date formats
+#' seen in clinical exports. A mixed-format column (some ISO, some d/m/Y, some
+#' compact) must not be forced through a single format chosen from the first row,
+#' which is what as.Date(x, tryFormats=) does. Handles:
+#'   * separators: yyyy-mm-dd, yyyy/mm/dd, dd/mm/yyyy, dd-mm-yyyy, mm/dd/yyyy
+#'   * text months: "03 Jan 2024", "12 December 1958", "5 Apr 2024"
+#'   * separator-less: ddmmyyyy / mmddyyyy / yyyymmdd (via se_parse_compact_date)
+#'   * datetimes: "yyyy-mm-dd HH:MM:SS" and DICOM "yyyymmdd HHMMSS" (date part)
+#' Day-first is preferred over month-first for ambiguous slashed values (SG
+#' convention): 03/04/1990 -> 3 Apr 1990. Values outside 1900-2100 are rejected.
+se_parse_date_any <- function(x) {
+  x <- as.character(x)
+  seps <- c("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y",
+            "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%b %d, %Y", "%B %d, %Y",
+            "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%d/%m/%Y %H:%M")
+  parse1 <- function(v) {
+    if (is.na(v)) return(NA_real_)
+    v <- trimws(v)
+    if (!nzchar(v)) return(NA_real_)
+    cd <- se_parse_compact_date(v)            # length-gated 8-digit / datetime
+    if (!is.na(cd)) return(as.numeric(cd))
+    for (f in seps) {
+      dd <- suppressWarnings(as.Date(v, format = f))
+      if (!is.na(dd)) {
+        yr <- as.integer(format(dd, "%Y"))
+        if (!is.na(yr) && yr >= 1900L && yr <= 2100L) return(as.numeric(dd))
+      }
+    }
+    NA_real_
+  }
+  as.Date(vapply(x, parse1, numeric(1), USE.NAMES = FALSE), origin = "1970-01-01")
+}
+
 se_generalize_date <- function(x, method = "year") {
-  d <- suppressWarnings(as.Date(x, tryFormats = c("%d/%m/%Y","%Y-%m-%d","%m/%d/%Y","%d-%m-%Y")))
+  d <- se_parse_date_any(x)
   out <- rep(NA_character_, length(x))
   ok <- !is.na(d)
   if (method == "year") out[ok] <- format(d[ok], "%Y")
@@ -38,18 +71,10 @@ se_generalize_date <- function(x, method = "year") {
 se_shift_date <- function(x, key, salt = "", subject_id = NULL, window = 365L) {
   x <- as.character(x)
   n <- length(x)
-  # parse per element: a mixed-format column (some ISO, some d/m/Y) must not be
-  # forced through a single format chosen from the first row.
-  fmts <- c("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y")
-  parse1 <- function(v) {
-    if (is.na(v) || !nzchar(v)) return(NA_real_)
-    for (f in fmts) {
-      dd <- suppressWarnings(as.Date(v, format = f))
-      if (!is.na(dd)) return(as.numeric(dd))
-    }
-    NA_real_
-  }
-  d <- as.Date(vapply(x, parse1, numeric(1)), origin = "1970-01-01")
+  # parse per element (shared parser: separators, text months, and the compact
+  # ddmmyyyy/mmddyyyy/yyyymmdd + DICOM "yyyymmdd hhmmss" forms). A mixed-format
+  # column must not be forced through a single format chosen from the first row.
+  d <- se_parse_date_any(x)
   window <- max(1L, as.integer(window))
   span   <- 2L * window + 1L
   subj   <- if (is.null(subject_id)) rep("_all_", n) else

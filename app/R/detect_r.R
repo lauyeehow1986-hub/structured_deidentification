@@ -33,6 +33,32 @@ se_nric_valid <- function(x) {
   identical(chk, expected)
 }
 
+# --- compact (separator-less) date parser ------------------------------------
+# Parse a run of exactly 8 digits (optionally followed by a HHMMSS time, e.g.
+# "19901231 143000" / "19901231T143000" — the DICOM/ECG-XML native forms) as a
+# calendar date, trying yyyymmdd, then ddmmyyyy, then mmddyyyy. Returns a Date
+# (date part only) or NA.
+#
+# The length gate is essential: R's as.Date("%Y%m%d") is greedy/lenient on the
+# wrong number of digits (e.g. "1990123" -> 1990-12-03; a trailing digit is
+# silently dropped), so a 7- or 9-digit serial would be mis-read as a date. We
+# only ever feed it an anchored, exactly-8-digit string, and require a plausible
+# calendar year (1900-2100) so an id like "01020304" (year 0102) is rejected.
+se_parse_compact_date <- function(s) {
+  s <- trimws(as.character(s))
+  m <- regmatches(s, regexec("^([0-9]{8})(?:[ T][0-9]{6})?$", s))[[1]]
+  if (length(m) < 2L) return(as.Date(NA))
+  d8 <- m[2]
+  for (f in c("%Y%m%d", "%d%m%Y", "%m%d%Y")) {
+    dd <- suppressWarnings(as.Date(d8, format = f))
+    if (!is.na(dd)) {
+      yr <- as.integer(format(dd, "%Y"))
+      if (!is.na(yr) && yr >= 1900L && yr <= 2100L) return(dd)
+    }
+  }
+  as.Date(NA)
+}
+
 # --- detector registry -------------------------------------------------------
 # pattern: PCRE regex (case-insensitive applied by scanner)
 # validate: optional function(match_string) -> logical
@@ -60,6 +86,15 @@ se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
     date = list(type="date", identifier="dob",
                 pattern="\\b(?:[0-3]?[0-9][/-][0-1]?[0-9][/-](?:19|20)[0-9]{2}|(?:19|20)[0-9]{2}[/-][0-1]?[0-9][/-][0-3]?[0-9])\\b",
                 validate=NULL, base_conf=0.75),
+    # separator-less 8-digit dates (ddmmyyyy/mmddyyyy/yyyymmdd) and the
+    # DICOM/ECG-XML "yyyymmdd hhmmss" datetime. The regex only proposes 8-digit
+    # (optionally +time) candidates; the validator confirms a real calendar date
+    # so arbitrary 8-digit ids/phones are NOT flagged (conf drops to 0.15). A
+    # confirmed date scores 0.99, beating the loose mrn catch-all on the same run.
+    date_compact = list(type="date", identifier="dob",
+                pattern="\\b[0-9]{8}(?:[ T][0-9]{6})?\\b",
+                validate=function(m) !is.na(se_parse_compact_date(m)),
+                base_conf=0.55),
     url = list(type="url", identifier="other_id",
                pattern="\\bhttps?://[^\\s]+\\b",
                validate=NULL, base_conf=0.95),

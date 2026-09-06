@@ -94,11 +94,37 @@ Status legend: ✅ done · 🚧 in progress · ⬜ planned
   **de-identification certificate** (JSON) citing PDPA / HIPAA Safe Harbor / SingHealth-IRB.
 - ⬜ Human-readable PDF certificate + full report.
 
-## Phase 7 — PDF + XML + vendor ECG ⬜
-- ⬜ Digital PDF true redaction (remove underlying text) → flattened PDF.
-- ⬜ Scanned PDF → offline OCR (Tesseract) → region redaction.
-- ⬜ XML tree scrub: generic + HL7 CDA / FHIR-XML + **Philips iECG/SierraECG** + **GE MUSE ECG**
-  (scrub demographic/test-header PHI, preserve the waveform payload).
+## Phase 7 — PDF + XML + vendor ECG ✅
+Pure-R, air-gap safe, in-process (pdftools / tesseract / magick / xml2 are bundled R
+packages — no subprocess, no network, no AV-quarantined binary). Wired into a new
+**Documents** tab and, when a project is open, written to `outputs/`, hashed into the
+manifest, and logged in the audit trail (`xml_scrub` / `pdf_redact` actions).
+- ✅ **Digital PDF true redaction** (`app/R/pdf_redact.R`). Word boxes from
+  `pdftools::pdf_data`; deterministic detectors locate PII; each page is rendered to a
+  raster, the PII boxes are painted solid, and the pages are reassembled as an
+  **image-only PDF** — the original text/vector layer is dropped entirely, so redacted
+  content cannot be recovered by copy-paste, text extraction, or removing a box.
+  A post-redaction guard OCRs each painted region and **fails closed** if a target is
+  still readable. Detectors are pluggable (`scan_fn`) so an NER/LLM-backed scanner can be
+  supplied to also catch free-text names.
+- ✅ **Scanned / image-only PDF** → offline **Tesseract OCR** word boxes
+  (`tesseract::ocr_data`), same redact/flatten pipeline. Auto-selected per page when
+  there is no text layer; `force_ocr` forces it.
+- ✅ **XML tree scrub** (`app/R/xml_scrub.R`): generic + HL7 CDA + FHIR + **Philips
+  SierraECG / iECG** + **GE MUSE ECG**. Profile auto-detected from root/namespace;
+  all XPaths use `local-name()` so vendor namespace prefixes never break matching.
+  Demographic / test-header PHI (patient name, ID, DOB→year, acquisition date→year /
+  time redacted, institution / site / department / operator / over-reader) is
+  pseudonymized / generalized / redacted, while the **waveform payload is preserved
+  byte-for-byte** — the scrubber never selects a waveform node and a post-scrub guard
+  asserts every protected node is unchanged (fails closed; `se_xml_scrub_file` refuses
+  to write otherwise). A high-precision value-level sweep (NRIC/email/phone/postal)
+  catches stray PHI in free-text nodes outside the protected subtree.
+- ✅ Synthetic fixtures + headless self-tests: `samples/make_xml_samples.R` (five
+  profiles with planted fake PHI + a distinctive waveform blob); XML, PDF, and
+  `testServer` Documents-tab suites all pass (header PHI removed, waveform preserved,
+  keyed pseudonyms stable, flattened output has no recoverable text, OCR guard confirms
+  targets unreadable while clinical text survives).
 
 ## Phase 8 — Batch + LLM + packaging ⬜
 - ⬜ Batch runner over many files/projects.

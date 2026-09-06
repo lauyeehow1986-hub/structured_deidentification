@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RestingECG>
+  <PatientDemographics>
+    <PatientID>MRN0099821</PatientID>
+    <PatientLastName>Kumar</PatientLastName>
+    <PatientFirstName>Anand</PatientFirstName>
+    <DateofBirth>03-15-1968</DateofBirth>
+    <Gender>MALE</Gender>
+    <Race>ASIAN</Race>
+  </PatientDemographics>
+  <TestDemographics>
+    <AcquisitionDate>06-14-2025</AcquisitionDate>
+    <AcquisitionTime>10:05:44</AcquisitionTime>
+    <SiteName>NHCS Cath Lab 2</SiteName>
+    <Location>12</Location>
+    <AcquisitionTechnician>NURSE FARIDAH</AcquisitionTechnician>
+    <OverreadingPhysician>DR CHUA S H</OverreadingPhysician>
+    <EditorID>tech0421</EditorID>
+  </TestDemographics>
+  <Diagnosis>
+    <DiagnosisStatement><StmtText>NORMAL SINUS RHYTHM</StmtText></DiagnosisStatement>
+  </Diagnosis>
+  <Waveform>
+    <WaveformType>Rhythm</WaveformType>
+    <SampleBase>500</SampleBase>
+    <WaveFormData>QkVHSU5fV0FWRUZPUk1fUEFZTE9BRF9ETy1OT1QtVE9VQ0hfQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5X0VORF9XQVZFRk9STV9QQVlMT0FE</WaveFormData>
+  </Waveform>
+</RestingECG>

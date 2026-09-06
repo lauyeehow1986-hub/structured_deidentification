@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<record>
+  <subject>
+    <contact>Reach patient at +65 8123 4567 or jane.lee@example.com</contact>
+    <nric>S2345678B</nric>
+    <note>Lives at Blk 12 Bedok, Singapore 521123; follow up scheduled.</note>
+  </subject>
+  <measurements>
+    <hr unit="bpm">72</hr>
+    <qtc unit="ms">430</qtc>
+  </measurements>
+</record>

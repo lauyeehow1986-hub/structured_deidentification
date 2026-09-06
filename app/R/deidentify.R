@@ -46,6 +46,26 @@ se_generalize_geo <- function(x, method = "region") {
   }, character(1), USE.NAMES = FALSE)
 }
 
+# Mask the last `mask_last` DIGITS of a value, preserving every non-digit char
+# and any leading digits. This is the standard SG postal-code generalisation:
+# keep the sector/area prefix, drop the precise last three that pinpoint the
+# building/delivery point. "521123" -> "521XXX"; "Singapore 521123" ->
+# "Singapore 521XXX". Non-numeric input is returned unchanged.
+se_mask_postal <- function(x, mask_last = 3L, mask_char = "X") {
+  vapply(x, function(v) {
+    if (is.na(v)) return(NA_character_)
+    v <- as.character(v)
+    pos <- gregexpr("[0-9]", v)[[1]]
+    if (pos[1] == -1L) return(v)
+    k <- min(as.integer(mask_last), length(pos))
+    if (k <= 0L) return(v)
+    to_mask <- pos[(length(pos) - k + 1L):length(pos)]
+    chars <- strsplit(v, "", fixed = TRUE)[[1]]
+    chars[to_mask] <- mask_char
+    paste(chars, collapse = "")
+  }, character(1), USE.NAMES = FALSE)
+}
+
 # --- free-text targeted redaction -------------------------------------------
 
 #' Replace only detected PII spans in a text with typed tags, keep the rest.
@@ -55,12 +75,16 @@ se_redact_freetext_value <- function(text, detectors = se_detectors(),
   sp <- se_scan_text(text, detectors)
   sp <- sp[sp$confidence >= min_conf, , drop = FALSE]
   if (!nrow(sp)) return(text)
+  sp <- se_dedup_overlaps(sp)
   # apply from rightmost span to leftmost so offsets stay valid
   sp <- sp[order(-sp$start), , drop = FALSE]
   out <- text
   for (i in seq_len(nrow(sp))) {
-    tag <- paste0("[", toupper(sp$type[i]), "]")
-    out <- paste0(substr(out, 1, sp$start[i] - 1L), tag,
+    matched <- substr(out, sp$start[i], sp$end[i])
+    # postal codes are masked (keep sector, drop last 3) rather than dropped whole
+    repl <- if (identical(sp$type[i], "postal")) se_mask_postal(matched)
+            else paste0("[", toupper(sp$type[i]), "]")
+    out <- paste0(substr(out, 1, sp$start[i] - 1L), repl,
                   substr(out, sp$end[i] + 1L, nchar(out)))
   }
   out
@@ -107,6 +131,7 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
         if (meth %in% c("year","year_month")) se_generalize_date(orig, meth)
         else if (meth == "age_band")          se_generalize_age(orig, opts$width %||% 5L)
         else if (meth == "region")            se_generalize_geo(orig, "region")
+        else if (meth == "postal_mask")       se_mask_postal(orig, opts$mask_last %||% 3L)
         else orig
       },
       "redact"          = ifelse(is.na(orig), NA_character_, "[REDACTED]"),

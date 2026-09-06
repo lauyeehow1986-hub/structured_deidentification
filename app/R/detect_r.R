@@ -38,8 +38,12 @@ se_nric_valid <- function(x) {
 # validate: optional function(match_string) -> logical
 # base_conf: confidence when matched (raised to ~0.99 when a validator passes)
 
-se_detectors <- function() {
-  list(
+#' @param postal6 opt-in: also treat a BARE 6-digit number as a possible SG
+#'   postal code (low confidence — 6-digit runs are ambiguous). Off by default;
+#'   the global default is read from options(se.detect_postal6). When on, matched
+#'   postal codes are generalised by masking the last 3 digits (see se_mask_postal).
+se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
+  d <- list(
     nric = list(type="nric", identifier="national_id",
                 pattern="\\b[STFGMstfgm][0-9]{7}[A-Za-z]\\b",
                 validate=se_nric_valid, base_conf=0.6),
@@ -75,6 +79,15 @@ se_detectors <- function() {
                pattern="\\b(?:[0-9]{4}[ -]?){3}[0-9]{4}\\b",
                validate=function(m){se_luhn(gsub("[ -]","",m))}, base_conf=0.6)
   )
+  if (isTRUE(postal6)) {
+    # bare 6-digit run as a possible postal code (ambiguous -> low confidence,
+    # placed last so the anchored "Singapore NNNNNN" form wins where both apply).
+    # opt-in, so act on it: confidence clears the free-text redaction threshold
+    # (0.5) and beats the loose mrn detector (0.4) on the same 6-digit run.
+    d$postal6 <- list(type="postal", identifier="postal_code",
+                      pattern="\\b[0-9]{6}\\b", validate=NULL, base_conf=0.5)
+  }
+  d
 }
 
 # Luhn check for card-like numbers.
@@ -112,6 +125,23 @@ se_scan_text <- function(text, detectors = se_detectors()) {
   }
   if (!length(out)) return(.se_empty_spans())
   do.call(rbind, out)
+}
+
+#' Drop spans that overlap a kept span, keeping the widest (then highest-
+#' confidence) span in each overlap cluster. Expects columns start,end,confidence.
+#' Used before applying replacements so an ambiguous bare-6-digit postal span and
+#' the anchored "Singapore NNNNNN" span covering it don't both get transformed.
+se_dedup_overlaps <- function(sp) {
+  if (is.null(sp) || !nrow(sp)) return(sp)
+  ord <- order((sp$end - sp$start), sp$confidence, decreasing = TRUE)
+  sp <- sp[ord, , drop = FALSE]
+  keep <- logical(nrow(sp)); occ <- list()
+  for (i in seq_len(nrow(sp))) {
+    s <- sp$start[i]; e <- sp$end[i]; ovl <- FALSE
+    for (r in occ) if (s <= r[2] && e >= r[1]) { ovl <- TRUE; break }
+    if (!ovl) { keep[i] <- TRUE; occ[[length(occ) + 1L]] <- c(s, e) }
+  }
+  sp[keep, , drop = FALSE]
 }
 
 .se_empty_spans <- function() {

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Patient xmlns="http://hl7.org/fhir">
+  <identifier>
+    <system value="https://nric.sg"/>
+    <value value="S5551234Z"/>
+  </identifier>
+  <name>
+    <family value="Wong"/>
+    <given value="Mei Ling"/>
+  </name>
+  <telecom>
+    <system value="phone"/>
+    <value value="+6591234567"/>
+  </telecom>
+  <gender value="female"/>
+  <birthDate value="1990-11-05"/>
+  <address>
+    <line value="Blk 5 Toa Payoh Lorong 8"/>
+    <city value="Singapore"/>
+    <postalCode value="310005"/>
+  </address>
+</Patient>

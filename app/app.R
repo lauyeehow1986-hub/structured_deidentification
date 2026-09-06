@@ -224,6 +224,32 @@ ui <- page_navbar(
         fileInput("imp_bundle", "Import a bundle (.zip)", accept = ".zip"),
         actionButton("btn_cert", "Generate de-identification certificate"),
         verbatimTextOutput("cert_out")))
+  ),
+
+  # DOCUMENTS · PDF / XML / vendor ECG
+  nav_panel("Documents", icon = icon("file-shield"),
+    layout_columns(col_widths = c(5, 7),
+      card(card_header("Redact a document (PDF / XML / ECG)"),
+        p(class = "small text-muted",
+          "Digital & scanned PDFs (true redaction — the text layer is removed, ",
+          "not just covered) and XML: generic, HL7 CDA / FHIR, and vendor ECG ",
+          "(Philips SierraECG / iECG, GE MUSE). ECG waveform payloads are preserved."),
+        fileInput("doc_file", NULL, accept = c(".pdf", ".xml"), width = "100%"),
+        uiOutput("doc_type"),
+        conditionalPanel("output.doc_is_pdf == true",
+          sliderInput("doc_dpi", "Render DPI (higher = finer / slower)", 100, 300, 150, 25),
+          checkboxInput("doc_force_ocr", "Force OCR (scanned pages / image-only)", FALSE)),
+        conditionalPanel("output.doc_is_xml == true",
+          checkboxInput("doc_sweep", "Also sweep free-text for stray PII", TRUE)),
+        checkboxInput("doc_postal6",
+          "Treat bare 6-digit numbers as postal codes (XML: mask last 3; PDF: redact)",
+          FALSE),
+        div(class = "mt-2",
+          actionButton("btn_doc_detect", "Detect PII"),
+          actionButton("btn_doc_redact", "Redact / scrub", class = "btn-primary")),
+        uiOutput("doc_status"),
+        div(class = "mt-2", downloadButton("dl_doc", "Download redacted file"))),
+      card(card_header("Findings / changes"), DTOutput("doc_findings")))
   )
 )
 
@@ -232,7 +258,7 @@ ui <- page_navbar(
 server <- function(input, output, session) {
   rv <- reactiveValues(proj = NULL, df = NULL, path = NULL, deid = NULL,
                        findings = NULL, profile = NULL, suggestion = NULL,
-                       userkey = NULL)
+                       userkey = NULL, doc = NULL)
 
   # Re-render after an explicit probe so the operator sees the new status.
   output$py_status <- renderText({ input$btn_enable_ner; se_py_status_text() })
@@ -670,6 +696,140 @@ server <- function(input, output, session) {
     output$cert_out <- renderText(paste(readLines(p$certificate), collapse = "\n"))
     se_audit_append(p$audit, "certificate", input$actor, list())
   })
+
+  # ---- documents (PDF / XML / vendor ECG) ----
+  observeEvent(input$doc_file, {
+    req(input$doc_file)
+    rv$doc <- list(path = input$doc_file$datapath, name = input$doc_file$name,
+                   ext = tolower(tools::file_ext(input$doc_file$name)),
+                   findings = NULL, output = NULL, waveform_ok = NA, profile = NA)
+  })
+
+  output$doc_is_pdf <- reactive({ !is.null(rv$doc) && identical(rv$doc$ext, "pdf") })
+  output$doc_is_xml <- reactive({ !is.null(rv$doc) && identical(rv$doc$ext, "xml") })
+  outputOptions(output, "doc_is_pdf", suspendWhenHidden = FALSE)
+  outputOptions(output, "doc_is_xml", suspendWhenHidden = FALSE)
+
+  output$doc_type <- renderUI({
+    d <- rv$doc
+    if (is.null(d)) return(div(class = "text-muted", "No document loaded."))
+    if (identical(d$ext, "xml")) {
+      prof <- tryCatch(se_xml_profile(xml2::read_xml(d$path)), error = function(e) "unreadable")
+      div(tags$b("XML profile: "), span(class = "badge bg-info", prof))
+    } else if (identical(d$ext, "pdf")) {
+      info <- tryCatch(pdftools::pdf_info(d$path), error = function(e) NULL)
+      pd <- tryCatch(pdftools::pdf_data(d$path), error = function(e) NULL)
+      has_text <- !is.null(pd) && any(vapply(pd, function(x) !is.null(x) && nrow(x) > 0, logical(1)))
+      div(tags$b("PDF: "),
+          sprintf("%s page(s) · %s", info$pages %||% "?",
+                  if (has_text) "digital text layer" else "no text layer (will OCR)"))
+    } else div(class = "text-danger", "Unsupported file type (PDF or XML only).")
+  })
+
+  # ephemeral key for detect-only previews and for ad-hoc redaction with no project
+  .doc_key <- function() {
+    if (!is.null(rv$proj)) se_resolve_key(rv$proj$hash_scope, rv$proj)
+    else as.raw(sample(0:255, 32L, replace = TRUE))
+  }
+
+  observeEvent(input$btn_doc_detect, {
+    req(rv$doc)
+    d <- rv$doc
+    old <- options(se.detect_postal6 = isTRUE(input$doc_postal6)); on.exit(options(old))
+    withProgress(message = "Detecting...", {
+      if (identical(d$ext, "xml")) {
+        res <- tryCatch(se_xml_scrub(d$path, key = .doc_key(),
+                                     sweep = isTRUE(input$doc_sweep)),
+                        error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL })
+        req(res)
+        rv$doc$findings <- res$changes[, c("xpath", "identifier", "action", "before"), drop = FALSE]
+        rv$doc$profile <- res$profile
+      } else if (identical(d$ext, "pdf")) {
+        f <- tryCatch(se_pdf_detect(d$path, dpi = as.integer(input$doc_dpi %||% 150L),
+                                    force_ocr = isTRUE(input$doc_force_ocr)),
+                      error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL })
+        req(f)
+        rv$doc$findings <- f[, c("page", "text", "type", "identifier"), drop = FALSE]
+      }
+    })
+    showNotification(sprintf("Detected %d item(s).", nrow(rv$doc$findings %||% data.frame())),
+                     type = "message")
+  })
+
+  observeEvent(input$btn_doc_redact, {
+    req(rv$doc)
+    d <- rv$doc
+    have_proj <- !is.null(rv$proj)
+    key <- if (have_proj) se_resolve_key(rv$proj$hash_scope, rv$proj)
+           else as.raw(sample(0:255, 32L, replace = TRUE))
+    outdir <- if (have_proj) se_project_paths(rv$proj$dir)$outputs else tempdir()
+    dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+    old <- options(se.detect_postal6 = isTRUE(input$doc_postal6)); on.exit(options(old))
+    base <- tools::file_path_sans_ext(basename(d$name))
+    det <- list(); ok <- TRUE
+    withProgress(message = "Redacting...", {
+      if (identical(d$ext, "xml")) {
+        outp <- file.path(outdir, paste0(base, "_deid.xml"))
+        res <- tryCatch(se_xml_scrub_file(d$path, outp, key = key,
+                                          sweep = isTRUE(input$doc_sweep)),
+                        error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL })
+        if (is.null(res)) { ok <- FALSE } else {
+          rv$doc$output <- outp; rv$doc$findings <- res$changes
+          rv$doc$waveform_ok <- res$waveform_ok; rv$doc$profile <- res$profile
+          det <- list(profile = res$profile, changes = res$n_changes,
+                      waveform_ok = res$waveform_ok)
+        }
+      } else if (identical(d$ext, "pdf")) {
+        outp <- file.path(outdir, paste0(base, "_redacted.pdf"))
+        res <- tryCatch(se_pdf_redact(d$path, outp,
+                                      dpi = as.integer(input$doc_dpi %||% 150L),
+                                      force_ocr = isTRUE(input$doc_force_ocr)),
+                        error = function(e) { showNotification(conditionMessage(e), type = "error"); NULL })
+        if (is.null(res)) { ok <- FALSE } else {
+          rv$doc$output <- outp; rv$doc$findings <- res$findings
+          rv$doc$waveform_ok <- NA; rv$doc$profile <- paste(unique(res$methods), collapse = ",")
+          det <- list(pages = res$pages, boxes = res$n_boxes, verified = res$verified,
+                      methods = paste(unique(res$methods), collapse = ","))
+        }
+      } else ok <- FALSE
+    })
+    req(ok)
+    if (have_proj) {
+      rv$proj <- se_register_input(rv$proj, d$path, actor = input$actor)  # register source
+      se_manifest_write(rv$proj)                                          # picks up output too
+      se_audit_append(se_project_paths(rv$proj$dir)$audit,
+                      if (identical(d$ext, "xml")) "xml_scrub" else "pdf_redact",
+                      input$actor,
+                      c(list(file = basename(d$name), output = basename(rv$doc$output),
+                             out_sha256 = substr(se_sha256_file(rv$doc$output), 1, 16)), det))
+    }
+    msg <- sprintf("Wrote %s.", basename(rv$doc$output))
+    if (isFALSE(rv$doc$waveform_ok)) {
+      showNotification(paste(msg, "WARNING: waveform-preservation guard FAILED."), type = "error")
+    } else showNotification(msg, type = "message")
+  })
+
+  output$doc_status <- renderUI({
+    d <- rv$doc
+    if (is.null(d) || is.null(d$output)) return(NULL)
+    wf <- if (isTRUE(d$waveform_ok)) span(class = "badge bg-success ms-1", "waveform preserved")
+          else if (isFALSE(d$waveform_ok)) span(class = "badge bg-danger ms-1", "WAVEFORM GUARD FAILED")
+          else NULL
+    div(class = "mt-2", tags$b("Wrote: "), basename(d$output), wf,
+        if (!is.null(rv$proj)) div(class = "small text-muted", "Saved to project outputs/ and logged in the audit trail.")
+        else div(class = "small text-muted", "No project open — saved to a temp file for download only (not logged)."))
+  })
+
+  output$doc_findings <- renderDT({
+    d <- rv$doc
+    if (is.null(d) || is.null(d$findings) || !nrow(d$findings))
+      return(datatable(data.frame(message = "Load a document, then Detect or Redact.")))
+    datatable(d$findings, options = list(scrollX = TRUE, pageLength = 10), rownames = FALSE)
+  })
+
+  output$dl_doc <- downloadHandler(
+    filename = function() basename(rv$doc$output %||% "redacted_output"),
+    content = function(file) { req(rv$doc$output); file.copy(rv$doc$output, file, overwrite = TRUE) })
 }
 
 shinyApp(ui, server)

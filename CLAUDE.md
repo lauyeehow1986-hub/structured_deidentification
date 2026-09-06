@@ -44,7 +44,7 @@ controller remains responsible for confirming adequacy of de-identification befo
 ## Project layout
 ```
 app/
-  app.R            Shiny UI + server (9 tabs)
+  app.R            Shiny UI + server (10 tabs incl. Documents: PDF/XML/ECG redaction)
   global.R         loads the core in order
   R/
     crypto.R       keyed HMAC pseudonyms, Feistel FPE, AEAD crosswalk, ed25519 signatures
@@ -58,6 +58,10 @@ app/
     keystore.R     global vs project key material
     project.R      portable project folder, manifest (SHA-256), input registration
     engine_py.R    passive, air-gap-safe bridge to the bundled Python NER
+    xml_scrub.R    XML de-id: generic + HL7 CDA/FHIR + Philips SierraECG + GE MUSE ECG
+                   (scrub header PHI, preserve waveform payload; pure R via xml2)
+    pdf_redact.R   PDF true redaction (digital + Tesseract OCR): rasterize + paint +
+                   flatten to image-only PDF (removes text layer); pure R
   python/
     detect_ner.py  Presidio + spaCy NER (bundled model; no download)
 samples/           synthetic test data + generator (make_sample.R) — NO real data

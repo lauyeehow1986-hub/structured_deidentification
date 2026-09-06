@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3">
+  <recordTarget>
+    <patientRole>
+      <id extension="S7654321A" root="2.16.840.1.113883.3.1"/>
+      <addr>
+        <streetAddressLine>10 Hospital Boulevard</streetAddressLine>
+        <city>Singapore</city>
+        <postalCode>169609</postalCode>
+      </addr>
+      <telecom value="tel:+6598765432"/>
+      <patient>
+        <name><given>Sarah</given><family>Goh</family></name>
+        <administrativeGender code="F"/>
+        <birthTime value="19800722"/>
+      </patient>
+    </patientRole>
+  </recordTarget>
+  <author>
+    <assignedAuthor>
+      <assignedPerson><name><given>Rajesh</given><family>Kumar</family></name></assignedPerson>
+    </assignedAuthor>
+  </author>
+  <component>
+    <structuredBody>
+      <component><section>
+        <title>Assessment</title>
+        <text>Normal sinus rhythm. No acute changes.</text>
+      </section></component>
+    </structuredBody>
+  </component>
+</ClinicalDocument>

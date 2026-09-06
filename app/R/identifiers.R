@@ -41,7 +41,7 @@ se_default_identifiers <- function() {
     # 6. Postal codes
     list(id="postal_code", label="Postal code", category="quasi",
          default_action="generalize",   detectors=c("postal"),
-         generalize="region", salt="postal"),
+         generalize="postal_mask", salt="postal"),
     # 7. Telephone / mobile numbers
     list(id="phone",       label="Telephone / mobile number", category="direct",
          default_action="pseudonymize", detectors=c("phone"), salt="phone"),

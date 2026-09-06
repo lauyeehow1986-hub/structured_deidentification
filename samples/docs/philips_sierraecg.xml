@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<restingecgdata xmlns="http://www3.medical.philips.com/PMS/ECG">
+  <documentinfo>
+    <documentname>ECG_00012345.xml</documentname>
+    <documentid>DOC-2025-0098231</documentid>
+  </documentinfo>
+  <patient>
+    <generalpatientdata>
+      <name>
+        <lastname>Tan</lastname>
+        <firstname>Wei Ming</firstname>
+        <middlename>Bernard</middlename>
+      </name>
+      <patientid>S1234567D</patientid>
+      <age><years>54</years><dateofbirth>1971-03-12</dateofbirth></age>
+      <sex>Male</sex>
+    </generalpatientdata>
+  </patient>
+  <dataacquisition date="2025-06-14" time="09:32:11">
+    <institution>National Heart Centre Singapore</institution>
+    <department>Cardiology</department>
+    <acquirer>
+      <lastname>Lim</lastname>
+      <firstname>Priya</firstname>
+    </acquirer>
+    <machine model="PageWriter TC70" id="ECG-CATH2"/>
+  </dataacquisition>
+  <interpretations>
+    <interpretation>
+      <statement><leftstatement>Sinus rhythm. Normal ECG.</leftstatement></statement>
+    </interpretation>
+  </interpretations>
+  <waveforms>
+    <parsedwaveforms>QkVHSU5fV0FWRUZPUk1fUEFZTE9BRF9ETy1OT1QtVE9VQ0hfQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5X0VORF9XQVZFRk9STV9QQVlMT0FE</parsedwaveforms>
+  </waveforms>
+</restingecgdata>

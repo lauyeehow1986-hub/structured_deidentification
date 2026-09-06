@@ -19,16 +19,23 @@ controller remains responsible for confirming adequacy of de-identification befo
   running `app/python/run_engine.py` (JSON in/out), NOT reticulate: on Windows R's OpenSSL and a
   standalone Python's OpenSSL cannot share one process (the `no OPENSSL_Applink` crash). **No
   network calls, ever.** `app/R/engine_py.R` probes passively (checks for a bundled interpreter on
-  disk) and only runs the subprocess on an explicit "Enable NER" click; the `ner`/`probe` runner
-  modes hard-disable outbound sockets, and Presidio is restricted to a spaCy-NER-only registry so
-  its `tldextract`-backed email recognizer can't fetch the public-suffix list. The optional LLM
-  second-opinion pass defaults to a **socket-free bundled llama.cpp** (a one-shot `llama-cli`
-  subprocess against an auto-discovered `models/llm/*.gguf` — medical default MediPhi-Instruct
-  Q4_K_M (MIT, extraction-tuned), Qwen2.5-3B-Instruct Q4_K_M (Apache-2.0) the generalist fallback;
-  multi-GGUF pick order `mediphi*`→`qwen2.5-3b*`→`qwen*`, see docs/ner_packaging.md; the `llm`
-  runner mode disables sockets for every backend except a local loopback Ollama, the one optional
-  exception). Never call `reticulate::py_available(initialize=TRUE)` or anything
-  that triggers uv/pip provisioning.
+  disk) and only runs the subprocess on an explicit click. The **default free-text detector is the
+  Privacy Filter (PF)** — OpenAI's `openai/privacy-filter` (Apache-2.0, a bidirectional token
+  classifier, BIOES decode), run out-of-process via `run_engine.py` `pf` mode on **onnxruntime +
+  tokenizers** over the exported ONNX graph (**no torch/transformers at runtime**), shipped as
+  `models/pf/`. The `pf` runner mode is in the **network-disabled** set alongside `ner`/`probe` —
+  zero sockets, same air-gap guarantee. **MediPhi (llama.cpp) and Presidio/spaCy NER are now
+  optional off-by-default backends** (code retained): the default bundle excludes the unsigned
+  `bin/llama` exes and the `models/llm` GGUF (ending the AV-quarantine problem) and prunes the
+  large spaCy `en_core_web_lg` model. When enabled, the `ner`/`probe` modes hard-disable outbound
+  sockets, and Presidio is restricted to a spaCy-NER-only registry so its `tldextract`-backed
+  email recognizer can't fetch the public-suffix list; the optional LLM pass is a socket-free
+  `llama-cli` subprocess against an auto-discovered `models/llm/*.gguf` (medical default
+  MediPhi-Instruct Q4_K_M (MIT, extraction-tuned), Qwen2.5-3B-Instruct Q4_K_M (Apache-2.0) the
+  generalist fallback; multi-GGUF pick order `mediphi*`→`qwen2.5-3b*`→`qwen*`, see
+  docs/ner_packaging.md; the `llm` runner mode disables sockets for every backend except a local
+  loopback Ollama, the one optional exception). Never call
+  `reticulate::py_available(initialize=TRUE)` or anything that triggers uv/pip provisioning.
 - **Portable projects:** all project state lives in one self-contained folder on the data drive
   (see `app/R/project.R`), so a job can be unplugged and resumed on another machine.
 - **Two key scopes everywhere:** `global` (link the same person across projects) and `project`
@@ -52,7 +59,11 @@ app/
     identifiers.R  the 15-identifier catalogue + default actions (editable per project)
     detect_r.R     deterministic detectors + validators (NRIC/FIN checksum, phone, email, ...)
     profile.R      column profiling + misplaced-PII / outlier detection
-    deidentify.R   transform engine (pseudonymize / fpe / generalize / redact / freetext)
+    deidentify.R   transform engine (pseudonymize / fpe / generalize / redact / freetext);
+                   date_shift (se_shift_date): consistent keyed per-subject day offset that
+                   PRESERVES intervals + is REVERSIBLE via the crosswalk (opt-in generalise);
+                   reviewable free-text redaction via se_redact_freetext_spans (honours reviewed
+                   policy$freetext_opts: confidence threshold, per-type toggles, per-value rejects)
     checkpoint.R   chunked/parallel/resumable de-id for large files (survives drive switch)
     sdc.R          statistical disclosure control (opt-in): k-anon, l-div, SUDA, risk, DCR, gate
     sdc_transforms.R  opt-in risk-reduction transforms: suppression / recode / top-bottom /
@@ -62,7 +73,9 @@ app/
                    assembles the content (superset of certificate.json), se_report_pdf renders
     keystore.R     global vs project key material
     project.R      portable project folder, manifest (SHA-256), input registration
-    engine_py.R    passive, air-gap-safe bridge to the bundled Python NER
+    engine_py.R    passive, air-gap-safe bridge to the bundled Python; se_pf_config/se_pf_scan
+                   drive the default Privacy Filter (ONNX) detector; se_detect_freetext(...,
+                   use_pf = TRUE) by default; optional Presidio NER retained behind a probe
     xml_scrub.R    XML de-id: generic + HL7 CDA/FHIR + Philips SierraECG + GE MUSE ECG
                    (scrub header PHI, preserve waveform payload; pure R via xml2)
     pdf_redact.R   PDF true redaction (digital + Tesseract OCR): rasterize + paint +

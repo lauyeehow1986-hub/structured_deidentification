@@ -15,9 +15,10 @@ on the target.
 sds/                      <- keep this folder name SHORT (see MAX_PATH below)
   app/                    Shiny UI + R core + Python engine sources
   bin/R/                  relocatable R 4.5.2 runtime + library (transitive closure)
-  bin/python/  (optional) relocatable CPython + Presidio/spaCy NER  (-IncludePython)
+  bin/python/             relocatable CPython + onnxruntime + tokenizers (PF engine)
+  models/pf/              Privacy Filter ONNX model (default free-text detector)
   bin/llama/   (optional) llama.cpp exes            (-IncludeLlama; AV-sensitive)
-  models/      (optional) *.gguf LLM weights        (-IncludeModels)
+  models/llm/  (optional) *.gguf LLM weights        (-IncludeModels)
   docs/  samples/  tools/
   run.bat / run.ps1              double-click launcher (Shiny on 127.0.0.1)
   run_batch.bat / run_batch.ps1  headless batch runner
@@ -29,9 +30,61 @@ Windows. Only `tessdata/eng.traineddata` (inside the `tesseract` package) is nee
 for OCR. So "portable R + (optional) Python" covers structured **and** document
 de-identification.
 
-`bin/llama/` is **excluded by default**: the unsigned `llama*.exe` are quarantined
-by some AV (Defender/AVG/McAfee). The LLM second-opinion pass is opt-in and
-sneakernetted separately; the bundle is complete without it.
+`bin/llama/` and `models/llm/` (the GGUF LLM weights) are now **excluded by
+default**, and the large spaCy model (`en_core_web_lg`) is **pruned** from the
+Python engine. This ends the AV-quarantine problem in the default bundle — the
+unsigned `llama*.exe` were the files that got flagged. MediPhi/llama.cpp and
+Presidio/spaCy NER are **optional off-by-default backends** (their code is
+retained, and presidio/spacy libraries stay installed so NER still imports if a
+model is re-added); add them back with `-IncludeLlama` / `-IncludeModels` and by
+restaging the spaCy model.
+
+## Default free-text detector — Privacy Filter (ONNX)
+
+The default free-text PII detector is now the **Privacy Filter (PF)** — OpenAI's
+`openai/privacy-filter` (**Apache-2.0**), a bidirectional token classifier
+(BIOES decode). It runs **out-of-process** via the bundled Python (`run_engine.py`
+`pf` mode) on **onnxruntime + tokenizers** over the model's exported ONNX graph —
+**no torch/transformers at runtime, no network**. The `pf` runner mode is in the
+**network-disabled** set (like `probe`/`ner`): zero sockets, same air-gap
+guarantee as the rest of the deployed bundle.
+
+It ships as `models/pf/`, laid out flat:
+
+```
+models/pf/
+  model_fp16.onnx            <- default: fp16 graph, CPU
+  model_fp16.onnx_data
+  model_fp16.onnx_data_1
+  tokenizer.json
+  config.json
+```
+
+`model_fp16.onnx` (fp16, CPU) is the default. If CPU latency is poor on the
+target, `model_q4f16.onnx` is the lighter fallback — swap it into `models/pf/`
+and point the config at it.
+
+### Fetch the model (build laptop, online OK)
+
+Download the model files from Hugging Face over Schannel and place them **flat**
+in `models/pf/`:
+
+```powershell
+$base = "https://huggingface.co/openai/privacy-filter/resolve/main"
+$dst  = "models\pf"
+New-Item -ItemType Directory -Force $dst | Out-Null
+curl.exe --ssl-no-revoke -L -o "$dst\config.json"             "$base/config.json"
+curl.exe --ssl-no-revoke -L -o "$dst\tokenizer.json"          "$base/tokenizer.json"
+curl.exe --ssl-no-revoke -L -o "$dst\model_fp16.onnx"         "$base/onnx/model_fp16.onnx"
+curl.exe --ssl-no-revoke -L -o "$dst\model_fp16.onnx_data"    "$base/onnx/model_fp16.onnx_data"
+curl.exe --ssl-no-revoke -L -o "$dst\model_fp16.onnx_data_1"  "$base/onnx/model_fp16.onnx_data_1"
+```
+
+Then install the two runtime deps into the bundled interpreter via its own pip:
+
+```powershell
+bin\python\python.exe -m pip install onnxruntime tokenizers
+```
 
 ## The MAX_PATH rule (why the bundle fits)
 
@@ -75,9 +128,12 @@ powershell -File tools\stage_r.ps1
 # 2) assemble -> prune -> audit -> closure-check -> zip. Builds to a SHORT external
 #    root (default C:\sds_build) because assembling inside a deep worktree path can
 #    itself hit MAX_PATH mid-build. Produces C:\sds_build\sds.zip.
-powershell -File tools\build_bundle.ps1                 # R + Python (default)
-#   -IncludeLlama  also ship bin\llama\ (AV-sensitive)
-#   -IncludeModels also ship models\*.gguf
+powershell -File tools\build_bundle.ps1                 # R + Python + PF (default)
+#   -IncludePF     ship models\pf\ (default ON — the default free-text detector)
+#   -PFModelDir <dir>  source dir for the PF model (default <repo>\models\pf)
+#   -SlimNER       prune the spaCy en_core_web_lg model (default ON)
+#   -IncludeLlama  also ship bin\llama\ (AV-sensitive; default OFF)
+#   -IncludeModels also ship models\llm\*.gguf         (default OFF)
 #   -Root  "C:\Users\<user>\Downloads\sds"   audit against a specific target root
 ```
 

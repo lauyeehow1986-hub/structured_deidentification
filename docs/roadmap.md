@@ -195,6 +195,30 @@ manifest, and logged in the audit trail (`xml_scrub` / `pdf_redact` actions).
     quarantines the unsigned exes) and sneakernetted separately. See
     [docs/packaging.md](packaging.md).
 
+## Phase 9 — Privacy Filter default + date_shift + reviewable redaction ✅ (2026-09-06)
+- ✅ **Privacy Filter (PF) is now the default free-text PII detector.** OpenAI's
+  `openai/privacy-filter` (**Apache-2.0**, a bidirectional token classifier, BIOES decode) runs
+  **out-of-process** via `run_engine.py` `pf` mode on **onnxruntime + tokenizers** over the exported
+  ONNX graph — no torch/transformers at runtime, **no network**. New R `se_pf_config()` /
+  `se_pf_scan()` (`app/R/engine_py.R`); `se_detect_freetext(..., use_pf = TRUE)` is the default.
+  The `pf` runner mode joins `ner`/`probe` in the **network-disabled** set (zero sockets). Ships as
+  `models/pf/` (`model_fp16.onnx` + data shards, `tokenizer.json`, `config.json`).
+- ✅ **Interval-preserving reversible `date_shift`** (`app/R/deidentify.R`, `se_shift_date`) — a
+  consistent keyed per-subject day offset that PRESERVES the intervals between a subject's dates and
+  is REVERSIBLE via the AEAD crosswalk. An optional generalise method; the default date treatment
+  stays `year` and the existing drop-day (`year_month`) / year-only (`year`) methods are unchanged.
+- ✅ **Reviewable gated free-text redaction** (`se_redact_freetext_spans`) — redaction consumes
+  reviewed decisions on `policy$freetext_opts` (confidence threshold, per-type toggles, per-value
+  rejects, content-keyed `(column, type, tolower(match))` so they survive the chunked engine). This
+  prevents silent over-redaction; the reviewer still sees the side-by-side diff.
+- ✅ **Slim, AV-clean default bundle.** MediPhi (llama.cpp) and Presidio/spaCy NER are now
+  **optional off-by-default backends** (code retained). The default bundle excludes the unsigned
+  `bin/llama` exes and the `models/llm` GGUF (ending the AV-quarantine problem) and prunes the large
+  spaCy `en_core_web_lg` model. Packaging switches in `tools/build_bundle.ps1`: `-IncludePF`
+  (default on), `-SlimNER` (default on), `-PFModelDir <dir>` (default `<repo>\models\pf`);
+  `-IncludeLlama` / `-IncludeModels` (default off) add the legacy LLM back. See
+  [docs/packaging.md](packaging.md).
+
 ## Open item
 - **Closed (2026-09-06).** The default identifier catalogue in `app/R/identifiers.R`
   (`se_default_identifiers()`) is the **canonical 15 SingHealth identifiers** (PDPA + HBRA):

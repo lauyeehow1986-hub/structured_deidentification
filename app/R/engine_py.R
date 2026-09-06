@@ -101,7 +101,7 @@ se_py_probe <- function() {
 se_py_scan <- function(texts) {
   st <- se_py_status()
   if (!isTRUE(st$presidio) || !isTRUE(st$spacy)) return(.se_empty_ner())
-  r <- .se_py_run("ner", list(texts = as.character(texts)))
+  r <- .se_py_run("ner", list(texts = I(as.character(texts))))
   if (is.null(r) || !is.data.frame(r) || !nrow(r)) .se_empty_ner() else r
 }
 
@@ -126,7 +126,9 @@ se_pf_scan <- function(texts) {
   if (is.null(se_py_binary())) return(.se_empty_ner())
   cfg <- se_pf_config()
   if (!isTRUE(cfg$available)) return(.se_empty_ner())
-  r <- .se_py_run("pf", list(texts = as.character(texts), model_dir = cfg$dir))
+  # I() keeps a single text an array (auto_unbox would collapse it to a scalar,
+  # which the runner would then iterate character-by-character).
+  r <- .se_py_run("pf", list(texts = I(as.character(texts)), model_dir = cfg$dir))
   if (is.null(r) || !is.data.frame(r) || !nrow(r)) .se_empty_ner() else r
 }
 
@@ -238,7 +240,7 @@ se_llm_scan <- function(texts) {
       if (!nzchar(cfg$llama_bin) || !file.exists(cfg$llama_bin) ||
           !nzchar(cfg$model_path) || !file.exists(cfg$model_path))
         return(.se_empty_ner())
-      list(texts = as.character(texts), backend = "llamacpp",
+      list(texts = I(as.character(texts)), backend = "llamacpp",
            llama_bin = cfg$llama_bin, model_path = cfg$model_path,
            # 1024 (not 512) so a batch's JSON completion doesn't truncate: a
            # medical SLM like MediPhi pretty-prints its output, inflating the
@@ -250,7 +252,7 @@ se_llm_scan <- function(texts) {
     },
     ollama = {
       if (!nzchar(cfg$ollama_model)) return(.se_empty_ner())
-      list(texts = as.character(texts), backend = "ollama",
+      list(texts = I(as.character(texts)), backend = "ollama",
            model = cfg$ollama_model, url = cfg$ollama_url)
     },
     return(.se_empty_ner()))

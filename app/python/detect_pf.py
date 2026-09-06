@@ -92,6 +92,10 @@ def pf_scan(texts, model_dir):
     config.json. Returns a list of span dicts (1-based inclusive start/end)."""
     if not texts or not model_dir or not os.path.isdir(model_dir):
         return []
+    # A single text marshalled by jsonlite auto_unbox arrives as a bare string;
+    # treat it as one text rather than iterating its characters.
+    if isinstance(texts, str):
+        texts = [texts]
     try:
         import numpy as np
         import onnxruntime as ort

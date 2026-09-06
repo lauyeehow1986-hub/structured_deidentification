@@ -156,14 +156,24 @@ removed that a human has not had the chance to reject:
    they are ever shown as accepted.
 3. **Per-type toggles.** The de-identifier can switch off whole categories in
    free text (e.g. keep `date` in prose, redact only `name`/`nric`).
-4. **Per-span accept/reject.** The findings table gains an `accept` column
-   (editable; rules default accepted, PF default accepted **but rejectable**).
-   The de-identifier can reject any individual span.
-5. **Redaction from accepted spans.** New `se_redact_freetext_spans(text, spans)`
-   redacts a cell using *only* that cell's accepted findings (offset-based, right-
-   to-left), replacing the blind re-scan. `se_deidentify_table` receives the
-   accepted findings and routes free-text columns through it.
-6. **Reviewer diff gate (existing).** The Review-output tab already shows original
+4. **Per-value reject.** The findings table lets the de-identifier reject entries.
+   Because de-identification is **chunked/resumable** (`se_deidentify_file` slices
+   the file and calls `se_deidentify_table` per chunk), a reject cannot be keyed
+   on a row index — it is keyed on **content**: `(column, type, tolower(match))`.
+   A rejected value is never redacted in any chunk. (PF's fixed 0.85 confidence
+   sits above the 0.5 default, so PF spans are redacted by default but a specific
+   value can be rejected, its type switched off, or the threshold raised past it.)
+5. **Decisions travel on the policy.** These controls are serialised onto the
+   policy object as `policy$freetext_opts = list(use_pf, min_conf, types,
+   rejects)`, so they flow unchanged to every (possibly parallel) chunk worker,
+   and any change re-hashes the policy and correctly invalidates stale checkpoints.
+6. **Chunk-safe redaction.** For each `redact_freetext` column, `se_deidentify_table`
+   re-scans the chunk's cells (deterministic rules always; `se_pf_scan` once over
+   the column when `use_pf`), applies the gate (min-conf, allowed types, rejects),
+   then redacts the surviving spans via the pure `se_redact_freetext_spans(text,
+   spans)` (offset-based, right-to-left; `postal` masked, else typed tag). The
+   blind `se_redact_freetext_value` is kept as the no-policy/ad-hoc fallback.
+7. **Reviewer diff gate (existing).** The Review-output tab already shows original
    ↔ de-identified side by side with a reviewer approve/return decision — the
    second human gate before the output is released.
 
@@ -210,10 +220,11 @@ that reviewable rather than assumed.
   (default checked), driven by `se_py_probe()$pf`. NER and LLM become secondary
   "advanced / optional backend" toggles (default off), with a note they require
   the separately-bundled models.
-- Free-text findings table becomes **editable**: add an `accept` checkbox column
-  (rules default TRUE, PF default TRUE-but-rejectable), plus a min-confidence
-  slider (default 0.5) and per-type include toggles. `rv$findings` gains the
-  `accept` flag; the de-identify step reads only accepted spans.
+- Free-text findings table becomes **selectable**: selecting rows marks them
+  *rejected* (excluded from redaction), captured as content keys `(column, type,
+  tolower(match))` in `rv$ft_rejects`. Add a min-confidence slider (default 0.5)
+  and per-type include checkboxes. `build_policy()` writes `freetext_opts =
+  list(use_pf, min_conf, types, rejects)` onto the policy.
 - Policy tab: for date/`dob` columns, add `date_shift` to the generalise-method
   choices, with `shift_window` (days, default 365) and an optional
   `shift_subject_col` selector.
@@ -235,14 +246,19 @@ that reviewable rather than assumed.
   named subject column (or `NULL`). Record original↔shifted in `crosswalk`
   (treat `date_shift` as a reversible action alongside `pseudonymize`/`fpe`).
 - `se_redact_freetext_spans(text, spans)` — redact a single cell using a supplied
-  span set (already filtered to accepted + threshold), right-to-left by offset,
-  same tag/`postal`-mask rules as `se_redact_freetext_value`. The blind
-  `se_redact_freetext_value` is retained as the fallback when no findings are
-  passed (e.g. ad-hoc redaction with no project/review).
-- `se_deidentify_table(df, policy, key, detectors, findings = NULL)` — new
-  optional `findings` arg (the accepted spans). For `redact_freetext` columns,
-  route each cell through `se_redact_freetext_spans` using that cell's accepted
-  spans when `findings` is supplied; else fall back to the current re-scan.
+  span set (already filtered), right-to-left by offset, same tag/`postal`-mask
+  rules as `se_redact_freetext_value`. Pure, unit-testable. The blind
+  `se_redact_freetext_value` is retained as the fallback for ad-hoc redaction with
+  no policy.
+- `se_deidentify_table` (signature unchanged): for `redact_freetext` columns,
+  read `policy$freetext_opts = list(use_pf, min_conf, types, rejects)`; re-scan the
+  chunk's cells with rules (and `se_pf_scan` once over the column when `use_pf`),
+  filter by min-conf + allowed types + content-keyed rejects `(cn, type,
+  tolower(match))`, then redact via `se_redact_freetext_spans`. When
+  `freetext_opts` is absent, fall back to `se_redact_freetext_value` (unchanged
+  behaviour). Because the decisions ride on `policy`, they reach every chunk
+  worker via the existing `se_deidentify_table(slice, policy, key, detectors)` call
+  in `checkpoint.R` — no `checkpoint.R` signature change.
 
 ### Packaging (modify)
 

@@ -67,3 +67,74 @@ def _decode_bioes(label_ids, offsets, id2label):
     if cur:
         spans.append(tuple(cur))
     return spans
+
+
+def _pick_onnx(model_dir):
+    for name in ("model_fp16.onnx", "model.onnx", "model_q4f16.onnx", "model_q4.onnx"):
+        p = os.path.join(model_dir, name)
+        if os.path.isfile(p):
+            return p
+    for f in sorted(os.listdir(model_dir)):
+        if f.endswith(".onnx"):
+            return os.path.join(model_dir, f)
+    raise FileNotFoundError("no .onnx in " + model_dir)
+
+
+def _load_id2label(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    raw = cfg.get("id2label") or {}
+    return {int(k): v for k, v in raw.items()}
+
+
+def pf_scan(texts, model_dir):
+    """texts: list[str]; model_dir: dir with the ONNX model + tokenizer.json +
+    config.json. Returns a list of span dicts (1-based inclusive start/end)."""
+    if not texts or not model_dir or not os.path.isdir(model_dir):
+        return []
+    try:
+        import numpy as np
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+        sess = ort.InferenceSession(_pick_onnx(model_dir),
+                                    providers=["CPUExecutionProvider"])
+        tok = Tokenizer.from_file(os.path.join(model_dir, "tokenizer.json"))
+        id2label = _load_id2label(os.path.join(model_dir, "config.json"))
+        in_names = [i.name for i in sess.get_inputs()]
+    except Exception:
+        return []
+
+    out = []
+    for ridx, text in enumerate(texts):
+        if text is None:
+            continue
+        text = str(text)
+        if not text.strip():
+            continue
+        try:
+            enc = tok.encode(text)
+            arr = np.array([enc.ids], dtype=np.int64)
+            feeds = {}
+            if "input_ids" in in_names:
+                feeds["input_ids"] = arr
+            if "attention_mask" in in_names:
+                feeds["attention_mask"] = np.ones_like(arr)
+            if "token_type_ids" in in_names:
+                feeds["token_type_ids"] = np.zeros_like(arr)
+            logits = sess.run(None, feeds)[0][0]          # (seq_len, num_labels)
+            label_ids = logits.argmax(-1).tolist()
+            spans = _decode_bioes(label_ids, enc.offsets, id2label)
+        except Exception:
+            continue
+        for base, s, e in spans:
+            mapped = _PF_MAP.get(base)
+            if not mapped:
+                continue
+            ident, typ = mapped
+            frag = text[s:e]
+            if len(frag.strip()) < 1:
+                continue
+            out.append({"row": ridx + 1, "start": s + 1, "end": e,
+                        "match": frag, "type": typ, "identifier": ident,
+                        "detector": "pf", "confidence": 0.85})
+    return out

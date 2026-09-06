@@ -90,6 +90,38 @@ se_redact_freetext_value <- function(text, detectors = se_detectors(),
   out
 }
 
+#' Redact a single free-text cell using a SUPPLIED span set (already filtered to
+#' accepted spans above the confidence threshold). Right-to-left by offset so
+#' positions stay valid; postal codes masked (keep sector), everything else
+#' replaced by a typed tag. Pure — no detector call, no re-scan.
+#' @param spans data.frame with columns start, end, type (1-based, inclusive).
+se_redact_freetext_spans <- function(text, spans) {
+  if (is.na(text) || !nzchar(text)) return(text)
+  if (is.null(spans) || !nrow(spans)) return(text)
+  # se_dedup_overlaps ranks by (width, confidence); supply a default so a
+  # caller may pass a minimal start/end/type span set (no confidence column).
+  if (is.null(spans$confidence)) spans$confidence <- 1
+  spans <- se_dedup_overlaps(spans)
+  spans <- spans[order(-spans$start), , drop = FALSE]
+  out <- text
+  for (i in seq_len(nrow(spans))) {
+    s <- spans$start[i]; e <- spans$end[i]
+    if (is.na(s) || is.na(e) || s < 1L || e < s || s > nchar(out)) next
+    matched <- substr(out, s, e)
+    # keep any trailing whitespace outside the tag so words stay separated
+    trail <- sub("^.*?(\\s*)$", "\\1", matched)
+    if (nzchar(trail)) {
+      e <- e - nchar(trail)
+      if (e < s) next
+      matched <- substr(out, s, e)
+    }
+    repl <- if (identical(spans$type[i], "postal")) se_mask_postal(matched)
+            else paste0("[", toupper(spans$type[i]), "]")
+    out <- paste0(substr(out, 1, s - 1L), repl, substr(out, e + 1L, nchar(out)))
+  }
+  out
+}
+
 # --- main engine -------------------------------------------------------------
 
 #' @param df       source data.frame (character columns recommended).
@@ -135,8 +167,45 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
         else orig
       },
       "redact"          = ifelse(is.na(orig), NA_character_, "[REDACTED]"),
-      "redact_freetext" = vapply(orig, se_redact_freetext_value, character(1),
-                                 detectors = detectors, USE.NAMES = FALSE),
+      "redact_freetext" = {
+        fo <- policy$freetext_opts %||% NULL
+        if (is.null(fo)) {
+          # no policy-level review options -> legacy blind re-scan (ad-hoc use)
+          vapply(orig, se_redact_freetext_value, character(1),
+                 detectors = detectors, USE.NAMES = FALSE)
+        } else {
+          min_conf    <- fo$min_conf %||% 0.5
+          types_allow <- fo$types    %||% NULL          # NULL = all types
+          rejects     <- fo$rejects  %||% character(0)  # "col\ttype\ttolower(match)"
+          pf_by_row <- NULL
+          if (isTRUE(fo$use_pf)) {
+            ps <- tryCatch(se_pf_scan(orig), error = function(e) NULL)
+            if (!is.null(ps) && nrow(ps)) pf_by_row <- split(ps, ps$row)
+          }
+          keepcols <- c("start", "end", "match", "type", "identifier",
+                        "detector", "confidence")
+          vapply(seq_along(orig), function(i) {
+            cell <- orig[i]
+            if (is.na(cell) || !nzchar(cell)) return(cell)
+            sp <- se_scan_text(cell, detectors)[, keepcols, drop = FALSE]
+            if (!is.null(pf_by_row)) {
+              pr <- pf_by_row[[as.character(i)]]
+              if (!is.null(pr) && nrow(pr))
+                sp <- rbind(sp, pr[, keepcols, drop = FALSE])
+            }
+            if (!nrow(sp)) return(cell)
+            sp <- sp[sp$confidence >= min_conf, , drop = FALSE]
+            if (!is.null(types_allow))
+              sp <- sp[sp$type %in% types_allow, , drop = FALSE]
+            if (length(rejects) && nrow(sp)) {
+              kk <- paste(cn, sp$type, tolower(sp$match), sep = "\t")
+              sp <- sp[!(kk %in% rejects), , drop = FALSE]
+            }
+            if (!nrow(sp)) return(cell)
+            se_redact_freetext_spans(cell, sp)
+          }, character(1), USE.NAMES = FALSE)
+        }
+      },
       "keep"            = orig,
       orig
     )

@@ -24,6 +24,57 @@ se_generalize_date <- function(x, method = "year") {
   out
 }
 
+#' Consistent, keyed per-subject date shift. The offset (in days) is deterministic
+#' from the scope key and the subject id, so every date belonging to one subject
+#' moves by the same amount and intervals between a subject's events are preserved.
+#' Reversible: the caller records original -> shifted in the AEAD crosswalk.
+#' @param x          character/Date vector.
+#' @param key        resolved scope key (raw/character).
+#' @param salt       per-column salt (namespaces the offset).
+#' @param subject_id character vector (recycled) naming the subject per element;
+#'                   NULL -> a single dataset-wide offset (still hides absolute
+#'                   dates, preserves every interval).
+#' @param window     max absolute offset in days; offset in [-window, +window].
+se_shift_date <- function(x, key, salt = "", subject_id = NULL, window = 365L) {
+  x <- as.character(x)
+  n <- length(x)
+  # parse per element: a mixed-format column (some ISO, some d/m/Y) must not be
+  # forced through a single format chosen from the first row.
+  fmts <- c("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d-%m-%Y")
+  parse1 <- function(v) {
+    if (is.na(v) || !nzchar(v)) return(NA_real_)
+    for (f in fmts) {
+      dd <- suppressWarnings(as.Date(v, format = f))
+      if (!is.na(dd)) return(as.numeric(dd))
+    }
+    NA_real_
+  }
+  d <- as.Date(vapply(x, parse1, numeric(1)), origin = "1970-01-01")
+  window <- max(1L, as.integer(window))
+  span   <- 2L * window + 1L
+  subj   <- if (is.null(subject_id)) rep("_all_", n) else
+            rep(as.character(subject_id), length.out = n)
+  cache  <- new.env(parent = emptyenv())
+  offset_for <- function(sid) {
+    dig <- as.raw(openssl::sha256(charToRaw(paste0(salt, "|", sid)), key = key))
+    acc <- 0
+    for (b in as.integer(dig[1:8])) acc <- (acc * 256 + b) %% span
+    acc - window
+  }
+  out <- rep(NA_character_, n)
+  for (i in seq_len(n)) {
+    if (is.na(d[i])) {
+      if (!is.na(x[i]) && nzchar(x[i])) out[i] <- "[DATE]"
+      next
+    }
+    sid <- subj[i]
+    off <- cache[[sid]]
+    if (is.null(off)) { off <- offset_for(sid); cache[[sid]] <- off }
+    out[i] <- format(d[i] + off, "%Y-%m-%d")
+  }
+  out
+}
+
 se_generalize_age <- function(x, width = 5L, cap = 90L) {
   a <- suppressWarnings(as.integer(x))
   out <- rep(NA_character_, length(x))
@@ -144,6 +195,8 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
     salt   <- ndef$salt %||% cn
     orig   <- as.character(df[[cn]])
 
+    meth <- opts$generalize %||% ndef$generalize %||% "year"
+
     new <- switch(action,
       "pseudonymize" = {
         prefix <- toupper(substr(gsub("[^A-Za-z]", "", ident %||% cn), 1, 3))
@@ -159,11 +212,18 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
         }, character(1), USE.NAMES = FALSE)
       },
       "generalize" = {
-        meth <- opts$generalize %||% ndef$generalize %||% "year"
         if (meth %in% c("year","year_month")) se_generalize_date(orig, meth)
-        else if (meth == "age_band")          se_generalize_age(orig, opts$width %||% 5L)
-        else if (meth == "region")            se_generalize_geo(orig, "region")
-        else if (meth == "postal_mask")       se_mask_postal(orig, opts$mask_last %||% 3L)
+        else if (meth == "age_band")   se_generalize_age(orig, opts$width %||% 5L)
+        else if (meth == "region")     se_generalize_geo(orig, "region")
+        else if (meth == "postal_mask") se_mask_postal(orig, opts$mask_last %||% 3L)
+        else if (meth == "date_shift") {
+          subj <- if (!is.null(opts$shift_subject_col) &&
+                      nzchar(opts$shift_subject_col %||% "") &&
+                      (opts$shift_subject_col %in% names(df)))
+                    as.character(df[[opts$shift_subject_col]]) else NULL
+          se_shift_date(orig, key, salt = salt, subject_id = subj,
+                        window = opts$shift_window %||% 365L)
+        }
         else orig
       },
       "redact"          = ifelse(is.na(orig), NA_character_, "[REDACTED]"),
@@ -212,7 +272,9 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
     out[[cn]] <- new
 
     # record reversible mappings for crosswalk
-    if (action %in% c("pseudonymize","fpe")) {
+    reversible <- action %in% c("pseudonymize", "fpe") ||
+                  (action == "generalize" && identical(meth, "date_shift"))
+    if (reversible) {
       keep <- !is.na(orig) & nzchar(trimws(orig))
       if (any(keep)) {
         uniq <- !duplicated(orig[keep])

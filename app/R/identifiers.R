@@ -75,7 +75,12 @@ se_default_identifiers <- function() {
 #' Build the default per-project policy: a named list keyed by column, filled in
 #' once columns are mapped to identifiers. Empty by default.
 se_empty_policy <- function() {
-  list(columns = list(), freetext_columns = character(0))
+  list(columns = list(), freetext_columns = character(0),
+       conf_overrides = list(), learned_patterns = list(),
+       applied_tunings = list(), version = 1L,
+       autotune = list(global_register = FALSE, learned_regex = FALSE,
+                       global_register_dir = NULL, min_support = 2L,
+                       max_fp = 0L))
 }
 
 se_action_choices <- function() {

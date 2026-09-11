@@ -60,7 +60,7 @@ se_table_header <- function(path, ext = tools::file_ext(path)) {
   if (ext %in% c("xlsx", "xls")) {
     nm <- names(readxl::read_excel(path, n_max = 0L))
   } else {
-    nm <- names(data.table::fread(path, nrows = 0L, showProgress = FALSE))
+    nm <- names(data.table::fread(path, sep = ",", nrows = 0L, showProgress = FALSE))
   }
   as.character(nm)
 }
@@ -68,8 +68,13 @@ se_table_header <- function(path, ext = tools::file_ext(path)) {
 #' Read one row-slice of a CSV by line offset. Safe only when the file has no
 #' embedded newlines (see se_plan_file, which decides).
 se_read_csv_chunk <- function(path, header, start, n) {
-  dt <- data.table::fread(path, skip = 1L + start, nrows = n, header = FALSE,
-                          colClasses = "character", showProgress = FALSE,
+  # sep="," is explicit: these are CSVs by contract. Without it, fread's
+  # separator autodetect can guess space for a single-column, comma-free file
+  # whose rows share a token count, splitting one free-text cell into phantom
+  # columns the redact_freetext pipeline never sees (silent under-redaction).
+  dt <- data.table::fread(path, sep = ",", skip = 1L + start, nrows = n,
+                          header = FALSE, colClasses = "character",
+                          showProgress = FALSE,
                           blank.lines.skip = FALSE, na.strings = NULL)
   if (ncol(dt) && length(header))
     data.table::setnames(dt, header[seq_len(ncol(dt))])
@@ -94,7 +99,8 @@ se_plan_file <- function(path, chunk_size = 50000L) {
     nrec <- nrow(df_all); mode <- "whole"
   } else {
     # record-accurate row count (fread respects quoting)
-    nrec <- nrow(data.table::fread(path, select = 1L, showProgress = FALSE,
+    nrec <- nrow(data.table::fread(path, sep = ",", select = 1L,
+                                   showProgress = FALSE,
                                    colClasses = "character", na.strings = NULL))
     # is line-offset slicing safe? (no records split across physical lines)
     nl <- .se_count_newlines(path)
@@ -105,7 +111,8 @@ se_plan_file <- function(path, chunk_size = 50000L) {
     } else {
       # quoting made line offsets unreliable — fall back to a single correct read
       df_all <- as.data.frame(
-        data.table::fread(path, colClasses = "character", showProgress = FALSE,
+        data.table::fread(path, sep = ",", colClasses = "character",
+                          showProgress = FALSE,
                           na.strings = NULL), stringsAsFactors = FALSE)
       nrec <- nrow(df_all); mode <- "whole"
     }

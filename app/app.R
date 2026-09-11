@@ -322,7 +322,43 @@ ui <- page_navbar(
     actionButton("btn_batch", "Run batch", class = "btn-primary"),
     br(), br(),
     DTOutput("batch_tbl"),
-    downloadButton("dl_batch_summary", "Download batch summary (CSV)"))
+    downloadButton("dl_batch_summary", "Download batch summary (CSV)")),
+
+  nav_panel("Improvement", icon = icon("wand-magic-sparkles"),
+    h4("Detection improvement (auto-tuning)"),
+    p(class="small text-muted",
+      "Learn from identifiers missed in previous runs. Record a miss, ingest a ",
+      "ground-truth file to measure recall, review suggestions, and apply approved ",
+      "tunings (versioned + audited). Both toggles below default off."),
+    fluidRow(
+      column(6,
+        h6("Toggles"),
+        checkboxInput("at_global_register",
+                      "Cross-project global register (aggregate-only)", FALSE),
+        checkboxInput("at_learned_regex", "Learned-regex generation", FALSE),
+        textInput("at_register_dir", "Register folder (aggregate-only)", "")),
+      column(6,
+        h6("Mark a missed identifier"),
+        textInput("at_miss_file", "File", "s.csv"),
+        textInput("at_miss_col", "Column", ""),
+        textInput("at_miss_val", "Missed value", ""),
+        selectInput("at_miss_id", "Identifier",
+                    choices = names(se_default_identifiers())),
+        actionButton("at_mark_miss", "Record miss", class = "btn-warning"))),
+    hr(),
+    fileInput("at_gold", "Ground-truth file (CSV: file,column,value,identifier)"),
+    actionButton("at_ingest", "Ingest gold", class = "btn-primary"),
+    br(), br(),
+    h6("Per-identifier recall"),
+    DTOutput("at_recall"),
+    h6("Suggestions (select rows to approve)"),
+    DTOutput("at_suggest"),
+    actionButton("at_apply", "Apply approved", class = "btn-success"),
+    actionButton("at_promote", "Promote to global register"),
+    br(), br(),
+    h6("Applied tunings"),
+    DTOutput("at_history"),
+    actionButton("at_revert", "Revert selected", class = "btn-danger"))
 )
 
 # ---- server -----------------------------------------------------------------
@@ -661,6 +697,81 @@ server <- function(input, output, session) {
     req(rv$proj)
     se_audit_append(se_project_paths(rv$proj$dir)$audit, "review_return", input$actor, list())
     showNotification("Returned to de-identifier.", type = "warning")
+  })
+
+  # ---- Improvement (Phase 9 auto-tuning) ----
+  at_suggestions <- reactiveVal(NULL)
+
+  observeEvent(input$at_mark_miss, {
+    req(rv$proj)
+    if (!nzchar(input$at_miss_val %||% "")) {
+      showNotification("Enter the missed value.", type = "error"); return() }
+    se_feedback_record_miss(rv$proj, file = input$at_miss_file,
+      column = input$at_miss_col, row = NA_integer_, span = NULL,
+      value = input$at_miss_val, identifier = input$at_miss_id,
+      source = "reviewer", actor = input$actor %||% "reviewer")
+    showNotification("Miss recorded.", type = "message")
+  })
+
+  observeEvent(input$at_ingest, {
+    req(rv$proj, input$at_gold)
+    gold <- utils::read.csv(input$at_gold$datapath, stringsAsFactors = FALSE,
+                            colClasses = "character")
+    ing <- se_autotune_ingest_gold(rv$proj, gold, inputs = NULL,
+                                   actor = input$actor %||% "reviewer")
+    output$at_recall <- renderDT(ing$recall)
+    at_suggestions(se_autotune_suggest(rv$proj))
+    output$at_suggest <- renderDT(at_suggestions(), selection = "multiple")
+  })
+
+  observeEvent(input$at_apply, {
+    req(rv$proj, at_suggestions())
+    sel <- input$at_suggest_rows_selected
+    if (!length(sel)) {
+      showNotification("Select suggestions to apply.", type = "error"); return() }
+    rv$proj <- se_autotune_apply(rv$proj, at_suggestions()[sel, , drop = FALSE],
+                                 actor = input$actor %||% "reviewer")
+    output$at_history <- renderDT(
+      data.frame(tuning_id = names(rv$proj$policy$applied_tunings)),
+      selection = "single")
+    showNotification(sprintf("Applied. Policy version %d.",
+                             rv$proj$policy$version), type = "message")
+  })
+
+  observeEvent(input$at_revert, {
+    req(rv$proj)
+    ids <- names(rv$proj$policy$applied_tunings)
+    sel <- input$at_history_rows_selected
+    if (!length(sel) || !length(ids)) return()
+    rv$proj <- se_autotune_revert(rv$proj, ids[sel[1]],
+                                  actor = input$actor %||% "reviewer")
+    output$at_history <- renderDT(
+      data.frame(tuning_id = names(rv$proj$policy$applied_tunings)),
+      selection = "single")
+    showNotification("Reverted.", type = "message")
+  })
+
+  observeEvent(input$at_global_register, {
+    req(rv$proj)
+    rv$proj$policy$autotune$global_register <- isTRUE(input$at_global_register)
+    rv$proj <- se_project_save(rv$proj)
+  })
+  observeEvent(input$at_learned_regex, {
+    req(rv$proj)
+    rv$proj$policy$autotune$learned_regex <- isTRUE(input$at_learned_regex)
+    rv$proj <- se_project_save(rv$proj)
+  })
+  observeEvent(input$at_promote, {
+    req(rv$proj)
+    rv$proj$policy$autotune$global_register_dir <- input$at_register_dir
+    out <- tryCatch(se_register_promote(rv$proj, at_suggestions(),
+      register_dir = input$at_register_dir, actor = input$actor %||% "reviewer"),
+      error = function(e) list(written = FALSE, err = conditionMessage(e)))
+    showNotification(
+      if (isTRUE(out$written)) "Promoted to global register."
+      else if (!is.null(out$err)) paste0("Not promoted: ", out$err)
+      else "Not promoted (global register toggle is off).",
+      type = if (isTRUE(out$written)) "message" else "warning")
   })
 
   # ---- SDC ----

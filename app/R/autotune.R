@@ -143,3 +143,50 @@ se_autotune_diagnose <- function(proj, min_conf = 0.5) {
   }
   fb
 }
+
+# --- ground-truth ingest ----------------------------------------------------
+#' Diff a gold table against detection to compute per-identifier recall and
+#' record every uncovered gold item as a source="gold" miss.
+#' @param gold data.frame(file, column, value, identifier).
+#' @param inputs an se_batch_plan() data.frame (path,file,type), or NULL.
+se_autotune_ingest_gold <- function(proj, gold, inputs = NULL,
+                                    actor = "unknown") {
+  stopifnot(all(c("file","column","value","identifier") %in% names(gold)))
+  det <- se_autotune_detectors(proj)
+  # collect the set of values detection WOULD catch across table inputs, lower-cased
+  caught <- character(0)
+  if (!is.null(inputs) && is.data.frame(inputs) && nrow(inputs)) {
+    tbl <- inputs[inputs$type == "table", , drop = FALSE]
+    for (path in tbl$path) {
+      if (!file.exists(path) || !grepl("\\.csv$", path, ignore.case = TRUE)) next
+      df <- tryCatch(utils::read.csv(path, stringsAsFactors = FALSE,
+                                     colClasses = "character"),
+                     error = function(e) NULL)
+      if (is.null(df)) next
+      for (cn in names(df)) for (cell in df[[cn]]) {
+        if (is.na(cell) || !nzchar(cell)) next
+        sp <- se_scan_text(cell, det)
+        if (nrow(sp)) caught <- c(caught, tolower(sp$match))
+      }
+    }
+  }
+  caught <- unique(caught)
+  covered <- tolower(gold$value) %in% caught
+  # record misses
+  for (i in which(!covered)) {
+    se_feedback_record_miss(proj, file = gold$file[i], column = gold$column[i],
+      row = NA_integer_, span = NULL, value = gold$value[i],
+      identifier = gold$identifier[i], source = "gold", actor = actor)
+  }
+  # per-identifier recall
+  agg <- lapply(split(covered, gold$identifier), function(v)
+    c(n = length(v), hit = sum(v), recall = mean(v)))
+  recall <- data.frame(identifier = names(agg),
+                       n = vapply(agg, `[[`, numeric(1), "n"),
+                       hit = vapply(agg, `[[`, numeric(1), "hit"),
+                       recall = vapply(agg, `[[`, numeric(1), "recall"),
+                       stringsAsFactors = FALSE, row.names = NULL)
+  se_audit_append(se_project_paths(proj$dir)$audit, "feedback_gold_ingested",
+                  actor, list(items = nrow(gold), missed = sum(!covered)))
+  list(recall = recall, missed = sum(!covered))
+}

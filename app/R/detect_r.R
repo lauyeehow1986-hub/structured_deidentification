@@ -68,7 +68,8 @@ se_parse_compact_date <- function(s) {
 #'   postal code (low confidence — 6-digit runs are ambiguous). Off by default;
 #'   the global default is read from options(se.detect_postal6). When on, matched
 #'   postal codes are generalised by masking the last 3 digits (see se_mask_postal).
-se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
+se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE),
+                         extra = list()) {
   d <- list(
     nric = list(type="nric", identifier="national_id",
                 pattern="\\b[STFGMstfgm][0-9]{7}[A-Za-z]\\b",
@@ -140,6 +141,10 @@ se_detectors <- function(postal6 = getOption("se.detect_postal6", FALSE)) {
     d$postal6 <- list(type="postal", identifier="postal_code",
                       pattern="\\b[0-9]{6}\\b", validate=NULL, base_conf=0.5)
   }
+  # Project-specific learned detectors (watchlist literals + learned patterns),
+  # appended AFTER the shipped set so shipped behaviour is byte-for-byte
+  # reproducible. Assembled by se_autotune_detectors(); empty by default.
+  if (length(extra)) d <- c(d, extra)
   d
 }
 
@@ -150,6 +155,55 @@ se_luhn <- function(num) {
   d <- rev(d)
   for (i in seq_along(d)) if (i %% 2 == 0) { d[i] <- d[i]*2; if (d[i] > 9) d[i] <- d[i]-9 }
   sum(d) %% 10 == 0
+}
+
+# PCRE-quote a literal so regex metacharacters match literally. \Q...\E is the
+# PCRE literal span; guard the rare case of a literal "\E" inside the value.
+.se_pcre_quote <- function(s) {
+  s <- gsub("\\\\E", "\\\\E\\\\\\\\E\\\\Q", s)  # split any embedded \E
+  paste0("\\Q", s, "\\E")
+}
+
+#' Build exact-match detectors from reviewer-confirmed literals.
+#' @param pairs data.frame(identifier, value) — or a list of {identifier,value}
+#'   (as it comes back after a project.json round-trip). Groups values per
+#'   identifier into one alternation detector each. High base_conf (known hits).
+se_watchlist_detector <- function(pairs) {
+  if (is.null(pairs)) return(list())
+  if (!is.data.frame(pairs)) {                     # coerce list -> data.frame
+    if (!length(pairs)) return(list())
+    pairs <- do.call(rbind, lapply(pairs, function(p) data.frame(
+      identifier = p$identifier, value = p$value, stringsAsFactors = FALSE)))
+  }
+  if (!nrow(pairs)) return(list())
+  out <- list()
+  for (id in unique(pairs$identifier)) {
+    vals <- unique(pairs$value[pairs$identifier == id])
+    vals <- vals[nzchar(vals)]
+    if (!length(vals)) next
+    pat <- paste0("(?:", paste(vapply(vals, .se_pcre_quote, character(1)),
+                               collapse = "|"), ")")
+    out[[paste0("wl_", id)]] <- list(
+      type = id, identifier = id, pattern = pat, validate = NULL,
+      base_conf = 0.95)
+  }
+  out
+}
+
+#' Build detectors from approved learned regex patterns.
+#' @param learned list of list(identifier, pattern, ...).
+se_learned_detectors <- function(learned) {
+  if (is.null(learned) || !length(learned)) return(list())
+  out <- list()
+  for (i in seq_along(learned)) {
+    e <- learned[[i]]
+    if (is.null(e$pattern) || !nzchar(e$pattern)) next
+    id <- e$identifier %||% "other_id"
+    out[[paste0("learned_", i)]] <- list(
+      type = id, identifier = id, pattern = e$pattern, validate = NULL,
+      base_conf = e$base_conf %||% 0.9)
+  }
+  out
 }
 
 #' Scan a single free-text string, returning a data.frame of spans.

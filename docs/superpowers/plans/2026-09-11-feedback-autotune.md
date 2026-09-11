@@ -404,12 +404,20 @@ stopifnot(nrow(fb) == 2L,
               %in% names(fb)),
           all(fb$identifier == "national_id"))
 
-# PHI boundary: ciphertext on disk does not contain the raw value
+# PHI boundary: ciphertext on disk does not contain the raw value.
+# NOTE: do NOT use rawToChar on ciphertext — embedded nul bytes crash it. Search
+# the raw byte stream for the plaintext's byte sequence instead.
+.contains_bytes <- function(hay, needle) {
+  n <- length(needle); if (!n) return(TRUE)
+  h <- length(hay);    if (h < n) return(FALSE)
+  for (i in seq_len(h - n + 1L))
+    if (identical(hay[i:(i + n - 1L)], needle)) return(TRUE)
+  FALSE
+}
 paths <- se_autotune_paths(tmp)
 stopifnot(file.exists(paths$feedback))
-disk <- rawToChar(readBin(paths$feedback, "raw",
-                          n = file.info(paths$feedback)$size), multiple = FALSE)
-stopifnot(!grepl("S1234567D", disk, fixed = TRUE))
+raw_fb <- readBin(paths$feedback, "raw", n = file.info(paths$feedback)$size)
+stopifnot(!.contains_bytes(raw_fb, charToRaw("S1234567D")))
 
 # audit event recorded
 p <- se_project_paths(tmp)
@@ -1294,13 +1302,21 @@ reg  <- file.path(tempdir(), paste0("reg10_", as.integer(runif(1, 1, 1e6))))
 se_feedback_record_miss(proj,"s.csv","note",1L,NULL,"S1234567D","national_id","reviewer","r")
 se_feedback_record_miss(proj,"s.csv","note",2L,NULL,"S1234567D","national_id","reviewer","r")
 
-# feedback + watchlist ciphertext on disk != plaintext
+# feedback + watchlist ciphertext on disk != plaintext (nul-safe byte search;
+# rawToChar crashes on embedded nul bytes in ciphertext)
+.contains_bytes <- function(hay, needle) {
+  n <- length(needle); if (!n) return(TRUE)
+  h <- length(hay);    if (h < n) return(FALSE)
+  for (i in seq_len(h - n + 1L))
+    if (identical(hay[i:(i + n - 1L)], needle)) return(TRUE)
+  FALSE
+}
 sg <- se_autotune_suggest(proj)
 proj <- se_autotune_apply(proj, sg[sg$lever=="watchlist", ][1, ], actor="r")
 pa <- se_autotune_paths(tmp)
 for (f in c(pa$feedback, pa$watchlist)) {
   raw <- readBin(f, "raw", n = file.info(f)$size)
-  stopifnot(!grepl("S1234567D", rawToChar(raw), fixed = TRUE))
+  stopifnot(!.contains_bytes(raw, charToRaw("S1234567D")))
 }
 
 # learned-regex OFF (default) => generalizer never yields a learned_regex lever

@@ -172,6 +172,23 @@ se_crosswalk_decrypt <- function(blob, key) {
   unserialize(payload)
 }
 
+# --- generic AEAD blob (feedback store, watchlist) --------------------------
+# Same construction as the crosswalk (sodium secretbox, XSalsa20-Poly1305) but
+# with a caller-supplied derivation `label`, so different at-rest stores under
+# the same project key get independent keys. Used by autotune.R for the
+# project-scoped, PHI-bearing feedback.enc / watchlist.enc.
+se_blob_encrypt <- function(obj, key, label) {
+  k <- se_derive_key(key, label, size = 32L)
+  payload <- serialize(obj, connection = NULL)
+  nonce <- sodium::random(24L)
+  list(nonce = nonce, ciphertext = sodium::data_encrypt(payload, k, nonce))
+}
+
+se_blob_decrypt <- function(blob, key, label) {
+  k <- se_derive_key(key, label, size = 32L)
+  unserialize(sodium::data_decrypt(blob$ciphertext, k, blob$nonce))
+}
+
 # --- detached signatures (per-stage "signages") ------------------------------
 # ed25519 over {sodium}. A user's signing key is generated once and stored in
 # their keystore; the public key travels in the project bundle so a reviewer on

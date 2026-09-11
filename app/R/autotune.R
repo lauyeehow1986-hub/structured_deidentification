@@ -109,3 +109,37 @@ se_autotune_detectors <- function(proj, postal6 = getOption("se.detect_postal6",
              se_learned_detectors(proj$policy$learned_patterns %||% list()))
   se_detectors(postal6 = postal6, extra = extra)
 }
+
+# --- diagnose ---------------------------------------------------------------
+#' Classify each miss into why_missed, deterministically. Reuses the shipped
+#' detectors via se_classify_value. min_conf floor defaults to 0.5 (the free-text
+#' redaction default) unless a conf_override is set for that identifier.
+se_autotune_diagnose <- function(proj, min_conf = 0.5) {
+  fb <- se_feedback_read(proj)
+  if (!nrow(fb)) return(fb)
+  ov     <- proj$policy$conf_overrides %||% list()
+  minsup <- se_autotune_config(proj)$min_support
+  vlow   <- tolower(fb$value)
+  counts <- table(vlow)
+  for (i in seq_len(nrow(fb))) {
+    val <- fb$value[i]; id <- fb$identifier[i]
+    floor_i <- ov[[id]] %||% min_conf
+    hits <- se_classify_value(val)              # named numeric: detector -> conf
+    id_hit <- NA_real_
+    if (length(hits)) {
+      dd <- se_detectors()
+      ids <- vapply(names(hits), function(n) dd[[n]]$identifier %||% NA_character_,
+                    character(1))
+      same <- hits[ids == id]
+      if (length(same)) id_hit <- max(same)
+      any_hit <- max(hits)
+    } else any_hit <- NA_real_
+    fb$why_missed[i] <-
+      if (!is.na(id_hit) && id_hit >= floor_i)      "wrong_column"
+      else if (!is.na(id_hit) && id_hit <  floor_i) "below_threshold"
+      else if (counts[[vlow[i]]] >= minsup)          "known_value"
+      else if (!is.na(any_hit))                      "detector_off"
+      else                                           "no_pattern"
+  }
+  fb
+}

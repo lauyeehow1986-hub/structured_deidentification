@@ -325,3 +325,70 @@ se_autotune_suggest <- function(proj, data = NULL) {
   }
   list(new_detections = as.integer(n_new), false_positives = as.integer(n_fp))
 }
+
+# --- apply / revert ---------------------------------------------------------
+#' Merge approved suggestion deltas into policy: versioned, audited, reversible.
+#' @param approved a data.frame subset of se_autotune_suggest() rows.
+se_autotune_apply <- function(proj, approved, actor = "unknown") {
+  if (is.null(approved) || !nrow(approved)) return(proj)
+  tuning_id <- paste0("t", format(Sys.time(), "%Y%m%d%H%M%S"), "_",
+                      as.integer(runif(1, 1, 1e6)))
+  prior <- list(conf_overrides = proj$policy$conf_overrides %||% list(),
+                learned_patterns = proj$policy$learned_patterns %||% list(),
+                columns = proj$policy$columns %||% list(),
+                watchlist = .se_watchlist_load(proj)$pairs)
+  wl <- prior$watchlist
+  deltas <- lapply(approved$delta, function(j) jsonlite::fromJSON(j,
+                                                simplifyVector = FALSE))
+  for (d in deltas) {
+    switch(d$lever,
+      threshold = {
+        proj$policy$conf_overrides[[d$identifier]] <- as.numeric(d$floor)
+      },
+      watchlist = {
+        add <- do.call(rbind, lapply(d$pairs, function(p) data.frame(
+          identifier = p$identifier, value = p$value, stringsAsFactors = FALSE)))
+        wl <- unique(rbind(wl, add))
+      },
+      column_enable = {
+        col <- d$column
+        spec <- proj$policy$columns[[col]] %||% list()
+        spec$force_detectors <- unique(c(spec$force_detectors %||% character(0),
+                                         unlist(d$detectors)))
+        proj$policy$columns[[col]] <- spec
+      },
+      learned_regex = {
+        proj$policy$learned_patterns[[length(proj$policy$learned_patterns)+1L]] <-
+          list(identifier = d$identifier, pattern = d$pattern,
+               tuning_id = tuning_id, added_by = actor,
+               ts = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
+      })
+  }
+  .se_watchlist_store(proj, list(pairs = wl))
+  proj$policy$version <- (proj$policy$version %||% 1L) + 1L
+  proj$policy$applied_tunings[[tuning_id]] <- list(
+    tuning_id = tuning_id, ts = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+    actor = actor, delta = deltas, prior = prior)
+  se_project_save(proj)
+  se_audit_append(se_project_paths(proj$dir)$audit, "feedback_tuning_applied",
+                  actor, list(tuning_id = tuning_id,
+                              levers = vapply(deltas, `[[`, character(1), "lever"),
+                              version = proj$policy$version))
+  proj
+}
+
+#' Undo a prior apply by restoring the pre-apply snapshot; audited.
+se_autotune_revert <- function(proj, tuning_id, actor = "unknown") {
+  ent <- proj$policy$applied_tunings[[tuning_id]]
+  if (is.null(ent)) stop("no such tuning_id: ", tuning_id)
+  proj$policy$conf_overrides   <- ent$prior$conf_overrides
+  proj$policy$learned_patterns <- ent$prior$learned_patterns
+  proj$policy$columns          <- ent$prior$columns
+  .se_watchlist_store(proj, list(pairs = ent$prior$watchlist))
+  proj$policy$applied_tunings[[tuning_id]] <- NULL
+  proj$policy$version <- (proj$policy$version %||% 1L) + 1L
+  se_project_save(proj)
+  se_audit_append(se_project_paths(proj$dir)$audit, "feedback_tuning_reverted",
+                  actor, list(tuning_id = tuning_id, version = proj$policy$version))
+  proj
+}

@@ -73,7 +73,21 @@ se_batch_run <- function(proj, plan, opts = list(), progress = NULL) {
       }
     }
   }
-  detectors  <- se_detectors()
+  detectors  <- se_autotune_detectors(proj)
+  # Promote columns carrying reviewer-approved force_detectors to be scanned for
+  # free-text PII even if their action was "keep" (the misplaced-PII fix).
+  if (length(policy$columns)) {
+    for (cn in names(policy$columns)) {
+      spc <- policy$columns[[cn]]
+      if (length(spc$force_detectors) &&
+          (is.null(spc$action) || identical(spc$action, "keep"))) {
+        spc$action <- "redact_freetext"
+        policy$columns[[cn]] <- spc
+      }
+    }
+    if (is.null(policy$freetext_opts))
+      policy$freetext_opts <- list(min_conf = 0.5, use_pf = FALSE)
+  }
   workers    <- as.integer(opts$workers %||% 1L)
   force      <- isTRUE(opts$force)
   out_format <- opts$out_format %||% "csv"

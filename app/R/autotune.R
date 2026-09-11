@@ -190,3 +190,138 @@ se_autotune_ingest_gold <- function(proj, gold, inputs = NULL,
                   actor, list(items = nrow(gold), missed = sum(!covered)))
   list(recall = recall, missed = sum(!covered))
 }
+
+# --- regex generalizer (learned_regex; suggestion-only) ---------------------
+#' Abstract a set of literal values to a bounded character-class PCRE, anchored
+#' with \b. Rejects over-broad patterns (matches too much corpus, or degenerate).
+#' Returns list(pattern, coverage, false_positives) or NULL if unsafe.
+se_autotune_generalize <- function(values, corpus = NULL, max_fp = 0L) {
+  values <- unique(values[nzchar(values)])
+  if (!length(values)) return(NULL)
+  tok <- function(s) {
+    chars <- strsplit(s, "")[[1]]
+    cls <- ifelse(grepl("[0-9]", chars), "D",
+           ifelse(grepl("[A-Za-z]", chars), "L", "S"))
+    rle(cls)
+  }
+  rr <- lapply(values, tok)
+  # require identical class-run structure across all values (a coherent shape)
+  sig <- vapply(rr, function(r) paste(r$values, r$lengths, collapse = "|"),
+                character(1))
+  if (length(unique(sig)) != 1L) return(NULL)
+  r <- rr[[1]]
+  piece <- mapply(function(v, n) {
+    base <- switch(v, D = "[0-9]", L = "[A-Za-z]", S = "[^A-Za-z0-9]")
+    if (n == 1L) base else paste0(base, "{", n, "}")
+  }, r$values, r$lengths)
+  pat <- paste0("\\b", paste(piece, collapse = ""), "\\b")
+  # specificity guard
+  if (grepl("^\\\\b(\\.\\*)?\\\\b$", pat)) return(NULL)
+  fp <- 0L
+  if (!is.null(corpus) && length(corpus)) {
+    corpus <- corpus[nzchar(corpus)]
+    hit <- vapply(corpus, function(x) grepl(pat, x, perl = TRUE), logical(1))
+    unintended <- setdiff(corpus[hit], values)
+    fp <- length(unintended)
+    if (length(corpus) && length(corpus[hit]) / length(corpus) > 0.5) return(NULL)
+    if (fp > max_fp) return(NULL)
+  }
+  list(pattern = pat, coverage = 1, false_positives = fp)
+}
+
+# --- suggest ----------------------------------------------------------------
+#' Aggregate diagnosed misses per identifier x cause (>= min_support), emit
+#' ranked suggestions with a policy-patch delta and a safety preview.
+se_autotune_suggest <- function(proj, data = NULL) {
+  dg <- se_autotune_diagnose(proj)
+  cfg <- se_autotune_config(proj)
+  empty <- data.frame(id = character(0), identifier = character(0),
+    lever = character(0), cause = character(0), support = integer(0),
+    evidence = character(0), delta = character(0),
+    new_detections = integer(0), false_positives = integer(0),
+    stringsAsFactors = FALSE)
+  if (!nrow(dg)) return(empty)
+  out <- list()
+  grp <- split(dg, paste(dg$identifier, dg$why_missed, sep = "\r"))
+  for (gk in names(grp)) {
+    g <- grp[[gk]]
+    id <- g$identifier[1]; cause <- g$why_missed[1]; support <- nrow(g)
+    if (support < cfg$min_support && cause != "below_threshold") next
+    lever <- switch(cause,
+      below_threshold = "threshold",
+      wrong_column    = "column_enable",
+      detector_off    = "column_enable",
+      known_value     = "watchlist",
+      no_pattern      = if (isTRUE(cfg$learned_regex)) "learned_regex" else "watchlist")
+    delta <- switch(lever,
+      threshold = {
+        confs <- unlist(lapply(g$value, function(v) {
+          h <- se_classify_value(v); if (length(h)) max(h) else 0.3 }))
+        floor <- max(0.1, min(confs) - 0.05)
+        list(lever = "threshold", identifier = id, floor = round(floor, 3))
+      },
+      watchlist = list(lever = "watchlist",
+        pairs = lapply(unique(g$value), function(v)
+          list(identifier = id, value = v))),
+      column_enable = list(lever = "column_enable",
+        column = g$column[1], detectors = list(id)),
+      learned_regex = {
+        gen <- se_autotune_generalize(g$value, corpus = NULL, max_fp = cfg$max_fp)
+        if (is.null(gen)) list(lever = "watchlist",
+          pairs = lapply(unique(g$value), function(v)
+            list(identifier = id, value = v)))
+        else list(lever = "learned_regex", identifier = id, pattern = gen$pattern)
+      })
+    lever <- delta$lever  # generalizer may have fallen back to watchlist
+    saf <- .se_suggest_safety(delta, data)
+    out[[length(out) + 1L]] <- data.frame(
+      id = paste0("sg_", length(out) + 1L), identifier = id, lever = lever,
+      cause = cause, support = support,
+      evidence = paste(utils::head(unique(g$value), 3), collapse = ", "),
+      delta = as.character(jsonlite::toJSON(delta, auto_unbox = TRUE)),
+      new_detections = saf$new_detections, false_positives = saf$false_positives,
+      stringsAsFactors = FALSE)
+  }
+  if (!length(out)) return(empty)
+  res <- do.call(rbind, out)
+  res[order(-res$support, res$false_positives), , drop = FALSE]
+}
+
+#' Safety preview: how many cells in `data` (a data.frame) the delta would newly
+#' redact, and how many of those look like false positives (a value already
+#' matching a shipped detector for a DIFFERENT identifier). Zero when no data.
+.se_suggest_safety <- function(delta, data) {
+  if (is.null(data) || !is.data.frame(data) || !ncol(data))
+    return(list(new_detections = 0L, false_positives = 0L))
+  extra <- switch(delta$lever,
+    watchlist = se_watchlist_detector(do.call(rbind, lapply(delta$pairs,
+      function(p) data.frame(identifier = p$identifier, value = p$value,
+                             stringsAsFactors = FALSE)))),
+    learned_regex = se_learned_detectors(list(list(identifier = delta$identifier,
+                                                   pattern = delta$pattern))),
+    list())
+  det_base <- se_detectors()
+  det_new  <- se_detectors(extra = extra)
+  cells <- unlist(lapply(data, as.character), use.names = FALSE)
+  cells <- cells[!is.na(cells) & nzchar(cells)]
+  n_new <- 0L; n_fp <- 0L
+  floor <- if (identical(delta$lever, "threshold")) delta$floor else 0.5
+  for (cell in cells) {
+    b <- se_scan_text(cell, det_base); a <- se_scan_text(cell, det_new)
+    if (identical(delta$lever, "threshold")) {
+      gained <- a[a$identifier == delta$identifier & a$confidence >= floor &
+                  a$confidence < 0.5, , drop = FALSE]
+    } else {
+      gained <- a[!(paste(a$start, a$end, a$match) %in%
+                    paste(b$start, b$end, b$match)), , drop = FALSE]
+    }
+    if (nrow(gained)) {
+      n_new <- n_new + nrow(gained)
+      for (j in seq_len(nrow(gained))) {
+        ov <- b[b$start <= gained$end[j] & b$end >= gained$start[j], , drop=FALSE]
+        if (nrow(ov)) n_fp <- n_fp + 1L
+      }
+    }
+  }
+  list(new_detections = as.integer(n_new), false_positives = as.integer(n_fp))
+}

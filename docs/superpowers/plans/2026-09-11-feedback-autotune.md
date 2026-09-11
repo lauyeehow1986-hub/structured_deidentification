@@ -720,9 +720,8 @@ fb <- se_feedback_read(proj)
 stopifnot(any(fb$source == "gold" & fb$value == "Tanaka"))
 
 p <- se_project_paths(tmp)
-au <- se_audit_read(p$audit)
-stopifnot(any(vapply(au, function(e)
-  identical(e$action, "feedback_gold_ingested"), logical(1))))
+au <- se_audit_read(p$audit)   # data.frame: one row per entry, action column
+stopifnot(is.data.frame(au), any(au$action == "feedback_gold_ingested"))
 cat("ALL TESTS PASSED\n")
 ```
 
@@ -1041,9 +1040,8 @@ stopifnot(!any(grepl("REC-XYZ", out1)))
 # audit chain verifies and the apply event is present
 p <- se_project_paths(tmp)
 stopifnot(isTRUE(se_audit_verify(p$audit)$ok))
-au <- se_audit_read(p$audit)
-stopifnot(any(vapply(au, function(e) identical(e$action,"feedback_tuning_applied"),
-                     logical(1))))
+au <- se_audit_read(p$audit)   # data.frame: one row per entry, action column
+stopifnot(is.data.frame(au), any(au$action == "feedback_tuning_applied"))
 
 # revert restores prior behaviour
 tid <- names(proj$policy$applied_tunings)[1]
@@ -1202,9 +1200,8 @@ stopifnot(!grepl("S1234567D", disk, fixed = TRUE),
           grepl("national_id", disk))
 
 p <- se_project_paths(tmp)
-au <- se_audit_read(p$audit)
-stopifnot(any(vapply(au, function(e) identical(e$action,"register_promoted"),
-                     logical(1))))
+au <- se_audit_read(p$audit)   # data.frame: one row per entry, action column
+stopifnot(is.data.frame(au), any(au$action == "register_promoted"))
 cat("ALL TESTS PASSED\n")
 ```
 

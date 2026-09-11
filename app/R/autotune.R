@@ -392,3 +392,57 @@ se_autotune_revert <- function(proj, tuning_id, actor = "unknown") {
                   actor, list(tuning_id = tuning_id, version = proj$policy$version))
   proj
 }
+
+# --- global register (aggregate-only; toggleable) ---------------------------
+#' Promote aggregate-only priors to a cross-project register. No-op unless the
+#' project's global_register toggle is on. Asserts no literal value is written.
+se_register_promote <- function(proj, applied, register_dir = NULL,
+                                actor = "unknown") {
+  cfg <- se_autotune_config(proj)
+  if (!isTRUE(cfg$global_register)) return(list(written = FALSE))
+  register_dir <- register_dir %||% cfg$global_register_dir
+  if (is.null(register_dir) || !nzchar(register_dir))
+    stop("global_register on but no register_dir")
+  dir.create(register_dir, showWarnings = FALSE, recursive = TRUE)
+  rj <- file.path(register_dir, "register.json")
+  reg <- if (file.exists(rj)) jsonlite::fromJSON(rj, simplifyVector = FALSE)
+         else list(entries = list())
+
+  dg <- se_autotune_diagnose(proj)
+  # aggregate per identifier: counts + threshold reco + generalized patterns.
+  # NEVER a literal value or a watchlist pair.
+  for (id in unique(dg$identifier)) {
+    sub <- dg[dg$identifier == id, , drop = FALSE]
+    pats <- character(0)
+    lp <- proj$policy$learned_patterns %||% list()
+    for (e in lp) if (identical(e$identifier, id)) pats <- c(pats, e$pattern)
+    thr <- proj$policy$conf_overrides[[id]] %||% NA_real_
+    entry <- list(identifier = id, miss_count = nrow(sub),
+                  projects = list(proj$name),
+                  threshold_reco = thr, patterns = as.list(unique(pats)),
+                  updated_ts = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
+    reg$entries[[length(reg$entries) + 1L]] <- entry
+  }
+  # HARD PHI ASSERTION: the serialized register must not contain any raw value.
+  wl <- .se_watchlist_load(proj)$pairs
+  ser <- jsonlite::toJSON(reg, auto_unbox = TRUE)
+  if (nrow(wl)) for (v in wl$value)
+    if (nzchar(v) && grepl(v, ser, fixed = TRUE))
+      stop("refusing to promote: literal value would leak to global register")
+  jsonlite::write_json(reg, rj, auto_unbox = TRUE, pretty = TRUE)
+  se_audit_append(se_project_paths(proj$dir)$audit, "register_promoted", actor,
+                  list(register_dir = register_dir,
+                       identifiers = unique(dg$identifier)))
+  list(written = TRUE, path = rj)
+}
+
+#' Surface cross-project priors (aggregate) as suggestions for a new project.
+se_register_suggest <- function(register_dir, identifiers = NULL) {
+  rj <- file.path(register_dir, "register.json")
+  if (!file.exists(rj)) return(list())
+  reg <- jsonlite::fromJSON(rj, simplifyVector = FALSE)
+  ent <- reg$entries %||% list()
+  if (!is.null(identifiers))
+    ent <- Filter(function(e) e$identifier %in% identifiers, ent)
+  ent
+}

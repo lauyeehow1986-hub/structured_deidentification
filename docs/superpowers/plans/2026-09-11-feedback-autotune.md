@@ -1179,11 +1179,17 @@ unlink(tmp, recursive = TRUE)
 proj <- se_project_create(tmp, "reg", actor = "d")
 reg  <- file.path(tempdir(), paste0("reg_", as.integer(runif(1, 1, 1e6))))
 
-# toggle OFF -> promote is a no-op (no register written)
-se_feedback_record_miss(proj,"s.csv","note",1L,NULL,"S1234567D","national_id","reviewer","r")
-se_feedback_record_miss(proj,"s.csv","note",2L,NULL,"S7654321J","national_id","reviewer","r")
+# Two recurring, NON-detectable literals -> known_value -> watchlist lever, so
+# the applied watchlist is non-empty and the PHI leak-refusal path is exercised.
+# (Do NOT use valid NRICs here: the shipped detector catches them at 0.99, which
+# diagnoses as wrong_column -> column_enable, leaving no watchlist suggestion.)
+se_feedback_record_miss(proj,"s.csv","note",1L,NULL,"ZZTOPCODE","mrn","reviewer","r")
+se_feedback_record_miss(proj,"s.csv","note",2L,NULL,"ZZTOPCODE","mrn","reviewer","r")
 sg <- se_autotune_suggest(proj)
+stopifnot("watchlist" %in% sg$lever)
 proj <- se_autotune_apply(proj, sg[sg$lever == "watchlist", ][1, ], actor = "r")
+
+# toggle OFF (default) -> promote is a no-op (no register written)
 out_off <- se_register_promote(proj, sg, register_dir = reg, actor = "r")
 stopifnot(is.null(out_off) || isFALSE(out_off$written))
 stopifnot(!file.exists(file.path(reg, "register.json")))
@@ -1191,13 +1197,13 @@ stopifnot(!file.exists(file.path(reg, "register.json")))
 # toggle ON -> aggregate entry written, NO literal PHI in the file
 proj$policy$autotune$global_register <- TRUE
 proj$policy$autotune$global_register_dir <- reg
-se_register_promote(proj, sg, register_dir = reg, actor = "r")
+res_on <- se_register_promote(proj, sg, register_dir = reg, actor = "r")
+stopifnot(isTRUE(res_on$written))
 rj <- file.path(reg, "register.json")
 stopifnot(file.exists(rj))
 disk <- paste(readLines(rj), collapse = "\n")
-stopifnot(!grepl("S1234567D", disk, fixed = TRUE),
-          !grepl("S7654321J", disk, fixed = TRUE),
-          grepl("national_id", disk))
+stopifnot(!grepl("ZZTOPCODE", disk, fixed = TRUE),   # watchlist literal must NOT leak
+          grepl("mrn", disk))                        # aggregate identifier present
 
 p <- se_project_paths(tmp)
 au <- se_audit_read(p$audit)   # data.frame: one row per entry, action column
@@ -1296,8 +1302,10 @@ unlink(tmp, recursive = TRUE)
 proj <- se_project_create(tmp, "phi", actor = "d")
 reg  <- file.path(tempdir(), paste0("reg10_", as.integer(runif(1, 1, 1e6))))
 
-se_feedback_record_miss(proj,"s.csv","note",1L,NULL,"S1234567D","national_id","reviewer","r")
-se_feedback_record_miss(proj,"s.csv","note",2L,NULL,"S1234567D","national_id","reviewer","r")
+# recurring NON-detectable literal -> watchlist lever, so watchlist.enc is
+# written (a valid NRIC would diagnose as wrong_column -> no watchlist).
+se_feedback_record_miss(proj,"s.csv","note",1L,NULL,"ZZTOPCODE","mrn","reviewer","r")
+se_feedback_record_miss(proj,"s.csv","note",2L,NULL,"ZZTOPCODE","mrn","reviewer","r")
 
 # feedback + watchlist ciphertext on disk != plaintext (nul-safe byte search;
 # rawToChar crashes on embedded nul bytes in ciphertext)
@@ -1312,8 +1320,9 @@ sg <- se_autotune_suggest(proj)
 proj <- se_autotune_apply(proj, sg[sg$lever=="watchlist", ][1, ], actor="r")
 pa <- se_autotune_paths(tmp)
 for (f in c(pa$feedback, pa$watchlist)) {
+  stopifnot(file.exists(f))
   raw <- readBin(f, "raw", n = file.info(f)$size)
-  stopifnot(!.contains_bytes(raw, charToRaw("S1234567D")))
+  stopifnot(!.contains_bytes(raw, charToRaw("ZZTOPCODE")))
 }
 
 # learned-regex OFF (default) => generalizer never yields a learned_regex lever

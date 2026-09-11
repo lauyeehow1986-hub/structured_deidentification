@@ -279,7 +279,16 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
                 sp <- rbind(sp, pr[, keepcols, drop = FALSE])
             }
             if (!nrow(sp)) return(cell)
-            sp <- sp[sp$confidence >= min_conf, , drop = FALSE]
+            # Per-identifier confidence floor (reviewer-approved threshold
+            # lever). Falls back to the global min_conf when no override set.
+            ov  <- policy$conf_overrides %||% list()
+            thr <- rep(min_conf, nrow(sp))
+            if (length(ov)) {
+              hit <- sp$identifier %in% names(ov)
+              if (any(hit)) thr[hit] <- unlist(ov[sp$identifier[hit]],
+                                               use.names = FALSE)
+            }
+            sp <- sp[sp$confidence >= thr, , drop = FALSE]
             if (!is.null(types_allow))
               sp <- sp[sp$type %in% types_allow, , drop = FALSE]
             if (length(rejects) && nrow(sp)) {

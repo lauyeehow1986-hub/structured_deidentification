@@ -219,6 +219,34 @@ manifest, and logged in the audit trail (`xml_scrub` / `pdf_redact` actions).
   `-IncludeLlama` / `-IncludeModels` (default off) add the legacy LLM back. See
   [docs/packaging.md](packaging.md).
 
+## Phase 9 — Feedback-driven detection tuning (auto-improvement)
+
+- ✅ **Closed-loop learning from missed identifiers** (`app/R/autotune.R`, pure R, offline,
+  deterministic). The loop: **capture** a miss → **diagnose** why → **suggest** a concrete fix →
+  reviewer **approves** → **apply** (versioned + audited + reversible) → future runs **detect** it;
+  with an optional **promote** to a cross-project register.
+- **Two capture sources:** reviewer marking (`se_feedback_record_miss`, Improvement tab) and
+  ground-truth diffing (`se_autotune_ingest_gold` → per-identifier recall; `--gold` on the CLI).
+- **Diagnosis** (`se_autotune_diagnose`) classifies each miss as `below_threshold` / `wrong_column`
+  / `detector_off` / `known_value` / `no_pattern` by re-running the shipped detectors.
+- **Four tuning levers** (`se_autotune_suggest`, ranked, with a safety preview of new detections /
+  false positives): **confidence threshold** (`policy$conf_overrides`), **per-project watchlist**
+  (encrypted literals), **per-column detector enable** (`force_detectors`), and **learned regex**
+  (`se_autotune_generalize`, bounded PCRE with a specificity guard, capped at `max_fp`).
+- **Suggest → approve → apply** autonomy: nothing changes behaviour until a reviewer approves.
+  `se_autotune_apply` merges the delta, bumps `policy$version`, snapshots prior state, and audits;
+  `se_autotune_revert` restores it. Detection assembles the augmented set via
+  `se_autotune_detectors` (shipped detectors are never edited — `se_detectors(extra=)`).
+- **Cross-project global register** (`se_register_promote` / `se_register_suggest`) — **toggleable,
+  default OFF**, and **aggregate-only**: per-identifier counts, threshold recos and *generalized*
+  patterns; it asserts no literal value can leak.
+- **Hard PHI boundary:** raw missed values + the watchlist are AEAD-encrypted and stay in the
+  project folder (`feedback.enc` / `watchlist.enc`, `crypto.R` `se_blob_encrypt`), same custody as
+  the crosswalk. **Learned-regex generation is also toggleable, default OFF.**
+- **Audit events** (all hash-chain verified): `feedback_miss_marked`, `feedback_gold_ingested`,
+  `feedback_tuning_applied`, `feedback_tuning_reverted`, `register_promoted`.
+- **Surfaces:** Improvement tab (`app/app.R`) + `batch_cli.R` `--gold` / `--apply-tunings`.
+
 ## Open item
 - **Closed (2026-09-06).** The default identifier catalogue in `app/R/identifiers.R`
   (`se_default_identifiers()`) is the **canonical 15 SingHealth identifiers** (PDPA + HBRA):

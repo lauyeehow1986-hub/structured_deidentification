@@ -83,7 +83,17 @@ app/
     batch.R        batch runner over many files: se_batch_plan routes by type, se_batch_run
                    drives the existing table/PDF/XML pipelines into one project (fail-soft,
                    idempotent, parallel; merges crosswalk, manifest, audit); pure R
-  batch_cli.R      headless CLI (args -> se_batch_run); driven by run_batch.ps1/.bat
+    autotune.R     feedback-driven detection tuning (Phase 9): capture missed
+                   identifiers (reviewer mark + gold diff), diagnose why, suggest a fix
+                   (threshold / watchlist / per-column force-detectors / learned-regex),
+                   reviewer approves -> versioned + audited apply (reversible); optional
+                   aggregate-only cross-project register + learned-regex, both default OFF.
+                   Raw values + watchlist AEAD-encrypted, project-scoped
+                   (feedback.enc / watchlist.enc); global register never stores literals.
+                   Hooks: se_detectors(extra=) + se_watchlist_detector in detect_r.R,
+                   policy$conf_overrides in deidentify.R, se_autotune_detectors in batch.R
+  batch_cli.R      headless CLI (args -> se_batch_run; --gold ingest, --apply-tunings);
+                   driven by run_batch.ps1/.bat
   python/
     detect_ner.py  Presidio + spaCy NER (bundled model; no download)
 samples/           synthetic test data + generator (make_sample.R) — NO real data

@@ -211,3 +211,22 @@ Writes `batch_summary.json` + `batch_summary.csv` into the project. `--strict`
 exits non-zero if any item errored. The interactive **Batch** tab exposes the same
 engine (input folder, recurse, workers, force, per-item status table, summary
 download).
+
+Two optional feedback-tuning flags (Phase 9): `--gold <file>` ingests a
+ground-truth table (`file,column,value,identifier`) after the run and writes
+per-identifier recall + tuning suggestions into `batch_summary.json`;
+`--apply-tunings` (requires an explicit `--actor`) applies those suggestions
+headless. Both are off by default. The interactive **Improvement** tab exposes
+the same loop (mark a miss, ingest gold, review suggestions, apply/revert,
+optional promote-to-register).
+
+## Feedback-tuning stores (Phase 9) — project-local, encrypted
+
+Auto-tuning keeps two extra files **inside the project folder** (they travel with
+the project, never in the bundle): `feedback.enc` (the captured missed values) and
+`watchlist.enc` (reviewer-confirmed literals to always catch). Both are
+**AEAD-encrypted** under the project key (same custody as `crosswalk.enc`) because a
+raw missed value is PHI. The optional cross-project **global register** written by
+"Promote to global register" is **aggregate-only** (per-identifier counts, threshold
+recommendations, generalized patterns — never a literal) and lives at an operator-
+chosen folder outside any project. No new files ship in the bundle.

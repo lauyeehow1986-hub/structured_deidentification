@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Structured De-identification — User Guide</title>
+<meta name="description" content="Air-gapped R/Shiny tool to de-identify structured data and documents (CSV/XLSX/PDF/XML/ECG). How to run it, with a full feature run-through on a synthetic dataset.">
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1a2530; --muted:#5b6b7a; --line:#e3e8ee;
+  --navy:#16324f; --navy2:#1e3f5f; --teal:#0f9d8f; --teal-ink:#0b7d72;
+  --amber:#c9820a; --red:#c0392b; --code-bg:#0f2233; --code-ink:#d6e3ef;
+  --chip:#eef4f3; --chip-ink:#0b7d72; --shadow:0 1px 3px rgba(16,42,67,.08),0 6px 20px rgba(16,42,67,.06);
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0e1620; --panel:#152231; --ink:#e6edf4; --muted:#9fb0c0; --line:#243444;
+  --navy:#0c2438; --navy2:#123048; --teal:#2dd4bf; --teal-ink:#5eead4;
+  --amber:#f0b352; --red:#f0736a; --code-bg:#0a1622; --code-ink:#cfe0ee;
+  --chip:#12333a; --chip-ink:#5eead4; --shadow:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
+}}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+a{color:var(--teal-ink);text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd{font-family:ui-monospace,SFMono-Regular,"Cascadia Code",Consolas,monospace;font-size:.9em}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px}
+
+/* hero */
+header.hero{background:linear-gradient(135deg,var(--navy),var(--navy2));color:#eaf2f8;padding:54px 0 46px}
+header.hero .wrap{max-width:1180px}
+.eyebrow{letter-spacing:.14em;text-transform:uppercase;font-size:12px;font-weight:700;color:#8fd8ce;margin:0 0 10px}
+header.hero h1{margin:0;font-size:clamp(28px,4.4vw,44px);line-height:1.1;font-weight:800;letter-spacing:-.02em}
+header.hero p.lede{margin:16px 0 0;max-width:760px;font-size:clamp(16px,2vw,19px);color:#cfe0ee}
+.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+.badge{background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);color:#eaf2f8;
+  padding:5px 11px;border-radius:999px;font-size:12.5px;font-weight:600}
+.badge.warn{background:rgba(201,130,10,.18);border-color:rgba(240,179,82,.45);color:#ffe0ad}
+
+/* layout */
+.shell{display:grid;grid-template-columns:236px 1fr;gap:38px;padding:34px 0 60px}
+nav.toc{position:sticky;top:18px;align-self:start;font-size:14px;max-height:calc(100vh - 36px);overflow:auto}
+nav.toc .t{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 8px}
+nav.toc a{display:block;color:var(--muted);padding:5px 10px;border-left:2px solid var(--line);border-radius:0 6px 6px 0}
+nav.toc a:hover{color:var(--ink);background:var(--chip);text-decoration:none;border-left-color:var(--teal)}
+main{min-width:0}
+@media (max-width:860px){.shell{grid-template-columns:1fr;gap:0}nav.toc{display:none}}
+
+section{scroll-margin-top:16px;margin:0 0 30px}
+h2{font-size:24px;font-weight:800;letter-spacing:-.01em;margin:34px 0 6px;padding-top:8px}
+h2 .n{color:var(--teal-ink);font-variant-numeric:tabular-nums}
+h3{font-size:18px;font-weight:700;margin:22px 0 6px}
+p{margin:10px 0}
+.lead{color:var(--muted)}
+hr.div{border:0;border-top:1px solid var(--line);margin:34px 0}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:22px 24px;margin:16px 0}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+@media (max-width:820px){.grid3,.grid2{grid-template-columns:1fr}}
+.step-badge{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;
+  background:var(--teal);color:#04201c;font-weight:800;font-size:14px;margin-right:8px}
+.card h3{margin-top:0}
+
+pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:14px 16px;overflow:auto;
+  font-size:13.5px;line-height:1.55;border:1px solid rgba(255,255,255,.06)}
+pre .c{color:#7fa8c9}
+p code,li code{background:var(--chip);color:var(--chip-ink);padding:1px 6px;border-radius:6px}
+
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0}
+.chip{background:var(--chip);color:var(--chip-ink);border:1px solid var(--line);padding:4px 10px;border-radius:999px;font-size:12.5px;font-weight:600}
+
+.feature{background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);
+  overflow:hidden;margin:20px 0}
+.feature .head{display:flex;align-items:baseline;gap:12px;padding:20px 24px 4px}
+.feature .head .num{font-size:13px;font-weight:800;color:#fff;background:var(--navy2);border-radius:8px;padding:3px 9px;flex:none}
+.feature .head h3{margin:0;font-size:20px}
+.feature .body{padding:6px 24px 8px;color:var(--ink)}
+.feature .body .lead{color:var(--muted);margin-top:2px}
+.feature figure{margin:14px 0 6px;background:var(--bg);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.feature figure img{display:block;width:100%;height:auto}
+.feature figcaption{color:var(--muted);font-size:13px;padding:10px 24px;background:var(--panel)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:8px 26px}
+@media (max-width:680px){.two{grid-template-columns:1fr}}
+.two h4{margin:10px 0 2px;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--teal-ink)}
+.two p{margin:2px 0 8px;font-size:14.5px}
+
+.callout{border-left:4px solid var(--teal);background:var(--chip);border-radius:0 10px 10px 0;padding:14px 18px;margin:16px 0}
+.callout.warn{border-left-color:var(--amber);background:rgba(201,130,10,.08)}
+.callout.warn b{color:var(--amber)}
+.callout p{margin:6px 0}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;font-size:14.5px}
+.kv b{color:var(--muted);font-weight:600;white-space:nowrap}
+
+footer{background:var(--navy);color:#bcd0e0;padding:30px 0;font-size:13.5px}
+footer a{color:#8fd8ce}
+footer .wrap{display:flex;flex-wrap:wrap;gap:10px 30px;justify-content:space-between;align-items:center}
+.small{font-size:13px;color:var(--muted)}
+.tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--teal-ink)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Air-gapped · R + Shiny · SingHealth 15 identifiers</p>
+    <h1>Structured De-identification System</h1>
+    <p class="lede">An admin-operated, unzip-and-run tool that de-identifies structured data (CSV/XLSX) and documents (PDF, XML, ECG) — removing or transforming the 15 SingHealth identifiers, catching PII that has been <em>misplaced</em> or buried in free text, and enforcing a two-person, tamper-evident workflow with signed sign-off.</p>
+    <div class="badges">
+      <span class="badge">No network, ever</span>
+      <span class="badge">Keyed pseudonyms · FPE · AEAD crosswalk</span>
+      <span class="badge">Hash-chained audit + signatures</span>
+      <span class="badge">SDC export gate</span>
+      <span class="badge warn">Educational / research — not for clinical use</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+<div class="shell">
+
+<nav class="toc" aria-label="Contents">
+  <div class="t">Get started</div>
+  <a href="#about">What this is</a>
+  <a href="#run">How to run it</a>
+  <a href="#dataset">The synthetic dataset</a>
+  <div class="t">Feature run-through</div>
+  <a href="#f-project">1 · Project</a>
+  <a href="#f-import">2 · Import</a>
+  <a href="#f-detect">3 · Detect</a>
+  <a href="#f-policy">4 · Policy</a>
+  <a href="#f-deid">5 · De-identify</a>
+  <a href="#f-review">6 · Review</a>
+  <a href="#f-sdc">7 · Disclosure control</a>
+  <a href="#f-audit">8 · Audit</a>
+  <a href="#f-signoff">9 · Sign-off</a>
+  <a href="#f-docs">Documents</a>
+  <a href="#f-batch">Batch</a>
+  <a href="#f-improve">Improvement</a>
+  <div class="t">More</div>
+  <a href="#hood">Under the hood</a>
+  <a href="#verify">Verification</a>
+</nav>
+
+<main>
+
+<section id="about">
+  <h2>What this is</h2>
+  <p class="lead">A portable governance tool for de-identifying research datasets before release. Everything runs locally in bundled R over pre-installed packages; heavy free-text detection runs out-of-process in a bundled Python (ONNX) — <b>no installation and no network calls, ever</b>. All project state lives in one self-contained folder that travels with the data drive, so a job can be unplugged and resumed on another machine.</p>
+  <div class="grid3">
+    <div class="card"><h3>Removes the 15 identifiers</h3><p class="small">Names, National ID (NRIC/FIN/temp&nbsp;IC/passport), MRN, case/visit, address, postal code, phone, fax, email, dates of birth/death, device serials, biometrics, photos, and other unique codes — each with an editable per-column action.</p></div>
+    <div class="card"><h3>Finds <em>misplaced</em> PII</h3><p class="small">Column profiling flags a validated NRIC typed into a date or serial-number column, and free-text detectors (rules + the Privacy&nbsp;Filter) catch identifiers buried in clinical notes.</p></div>
+    <div class="card"><h3>Proves what it did</h3><p class="small">Every step is written to a hash-chained audit log with a SHA-256 manifest; a de-identifier and a reviewer sign the bundle, and a signed PDF certificate is emitted.</p></div>
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="run">
+  <h2>How to run it</h2>
+  <p class="lead">Three ways in, depending on whether you have the packaged bundle, the source repo, or a folder of files to process headlessly.</p>
+
+  <div class="card">
+    <h3><span class="step-badge">A</span>Deployed bundle — unzip and double-click</h3>
+    <p>On the locked-down target, no install and no PowerShell required:</p>
+    <ol>
+      <li>Copy <code>sds_pf.zip</code> to <code>Downloads</code> and <b>Extract All…</b> (File&nbsp;Explorer). Keep the folder short — <code>C:\Users\&lt;you&gt;\Downloads\sds</code>.</li>
+      <li>Double-click <code>run.bat</code> — it locates the bundled R and opens the app at <code>http://127.0.0.1</code> in your browser.</li>
+      <li>First, verify the bundle is intact and MAX_PATH-safe: double-click <code>tools\verify.bat</code> and expect <code>VERIFY PASS</code>.</li>
+    </ol>
+    <p class="small">The bundle carries a relocatable R runtime, the bundled Python + ONNX Privacy Filter model, sample data, and the docs. It never reaches the network.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h3><span class="step-badge">B</span>From source (developer)</h3>
+      <p class="small">With R 4.5.x installed and the app's package dependencies present:</p>
+<pre><span class="c"># interactive app on port 7788</span>
+Rscript -e "shiny::runApp('app', port=7788)"
+
+<span class="c"># regenerate the synthetic fixtures</span>
+Rscript samples/make_sample.R
+Rscript samples/make_xml_samples.R</pre>
+    </div>
+    <div class="card">
+      <h3><span class="step-badge">C</span>Headless batch</h3>
+      <p class="small">Process a whole folder into one project — same engine as the UI:</p>
+<pre>run_batch.bat --project &lt;projectDir&gt; \
+  --inputs &lt;folder&gt; [--recursive] \
+  [--workers 4] [--out-format csv] \
+  [--actor NAME] [--force] [--strict]
+
+<span class="c"># optional feedback tuning (Phase 9)</span>
+  [--gold gold.csv] [--apply-tunings --actor NAME]</pre>
+    </div>
+  </div>
+
+  <div class="callout warn">
+    <p><b>Roles.</b> Pick <em>De-identifier</em> or <em>Reviewer</em> in the sidebar. Running the transform requires the De-identifier role; approving output and countersigning requires the Reviewer role — that is the two-person segregation of duties.</p>
+  </div>
+</section>
+
+<hr class="div">
+
+<section id="dataset">
+  <h2>The synthetic dataset</h2>
+  <p class="lead">Every screenshot below is a live run over the shipped synthetic data (<code>samples/make_sample.R</code>) — <b>no real patient data</b>. It is 40 rows of invented patients with realistic Singapore shapes, and it deliberately plants the hard cases:</p>
+  <div class="chips">
+    <span class="chip">Valid NRIC/FIN checksums</span>
+    <span class="chip">Hospital temp ICs (X/Y prefix)</span>
+    <span class="chip">NRIC misplaced into a date column</span>
+    <span class="chip">NRIC misplaced into a serial-number column</span>
+    <span class="chip">Case number in the MRN column</span>
+    <span class="chip">NRIC + phone + email inside free-text notes</span>
+  </div>
+  <p class="small">The XML/ECG run uses <code>samples/make_xml_samples.R</code>, which emits one file per supported profile (Philips SierraECG, GE MUSE, HL7 CDA, FHIR, generic), each carrying a recognisable waveform payload so you can confirm the signal survives de-identification.</p>
+</section>
+
+<hr class="div">
+
+<h2 style="margin-bottom:2px">Feature run-through</h2>
+<p class="lead" style="margin-top:2px">The eleven workflow tabs plus the auto-tuning tab, in order, each shown against the synthetic dataset.</p>
+
+<!-- 1 PROJECT -->
+<section id="f-project" class="feature">
+  <div class="head"><span class="num">1</span><h3>Project — create a portable job folder</h3></div>
+  <div class="body">
+    <p class="lead">Create or open a self-contained project folder on the data drive, and choose the key scope.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>A new project <code>DemoStudy</code> created at <code>C:/sds_guide/DemoStudy</code> with a project-specific key. The right panel documents what the folder holds — settings, inputs/outputs, checkpoints, the encrypted crosswalk, the SHA-256 manifest, the audit log, signatures and the certificate.</p></div>
+      <div><h4>How it works</h4><p><b>Project key</b> isolates a study; <b>global key</b> lets the same person link across studies. The whole folder is portable: unplug the drive and resume on another machine. Re-identification is possible only with the key via the AEAD crosswalk.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/01_project.png" alt="Project tab: create or open a project folder" loading="lazy"></figure>
+  <figcaption>Tab 1 — Project. Create/open, project vs global key scope, and the portable folder layout.</figcaption>
+</section>
+
+<!-- 2 IMPORT -->
+<section id="f-import" class="feature">
+  <div class="head"><span class="num">2</span><h3>Import — load and register a table</h3></div>
+  <div class="body">
+    <p class="lead">Load a CSV/XLSX; the file is checksummed and registered into the project.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>The synthetic <code>sample_patients.csv</code> loaded — <b>40 rows × 12 columns</b>, its SHA-256 shown, with a live preview of the 15-identifier columns (name, NRIC, case no, MRN, DOB, phone, email…).</p></div>
+      <div><h4>How it works</h4><p>Import copies the source into <code>inputs/</code>, records its SHA-256 in the manifest, and writes an <code>import</code> entry to the audit chain — so the exact bytes that were processed are provable later.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/02_import.png" alt="Import tab: uploaded synthetic CSV with preview" loading="lazy"></figure>
+  <figcaption>Tab 2 — Import. Upload complete, checksum recorded, and a preview of the synthetic patient table.</figcaption>
+</section>
+
+<!-- 3 DETECT -->
+<section id="f-detect" class="feature">
+  <div class="head"><span class="num">3</span><h3>Detect — PII, misplaced values &amp; free text</h3></div>
+  <div class="body">
+    <p class="lead">Layered, offline detection: deterministic validators, column profiling, and the free-text Privacy Filter.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>The scanner flags the <b>misplaced temp ICs</b> in the <code>nric</code> column as an unusual shape, and surfaces <b>free-text PII</b> — a phone number found inside <code>notes</code> (row 3). The Privacy Filter is enabled for free-text scanning.</p></div>
+      <div><h4>How it works</h4><p>Rules validate NRIC/FIN checksums, phone, email, dates and cards; profiling compares each cell's shape and content type against its column's majority to catch misplaced identifiers; the <b>Privacy&nbsp;Filter</b> (an ONNX token classifier) runs out-of-process for names/addresses in prose.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/03_detect.png" alt="Detect tab: misplaced-PII and free-text findings" loading="lazy"></figure>
+  <figcaption>Tab 3 — Detect. Misplaced-PII outliers and free-text findings, each with a confidence and suggested identifier.</figcaption>
+</section>
+
+<!-- 4 POLICY -->
+<section id="f-policy" class="feature">
+  <div class="head"><span class="num">4</span><h3>Policy — per-column actions</h3></div>
+  <div class="body">
+    <p class="lead">Map each column to an identifier and an action; auto-suggest proposes a sensible default you can override.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>Auto-suggest has mapped the columns from their names and content (each row shows its detected shape): <code>record_id</code>→keep, <code>patient_name</code>→pseudonymize, <code>nric</code>→National&nbsp;ID, and so on. The policy is saved to <code>project.json</code>.</p></div>
+      <div><h4>How it works</h4><p>Actions are <b>pseudonymize</b> (keyed token), <b>FPE</b> (keep the ID's shape), <b>generalize</b> (year, age band, region, postal mask, or interval-preserving date-shift), <b>redact</b>, and <b>free-text targeted redaction</b>. FPE is opt-in per field; dates default to year-only.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/04_policy.png" alt="Policy tab: per-column identifier and action mapping" loading="lazy"></figure>
+  <figcaption>Tab 4 — Policy. Auto-suggested per-column mapping with date-handling controls; fully overridable.</figcaption>
+</section>
+
+<!-- 5 DEIDENTIFY -->
+<section id="f-deid" class="feature">
+  <div class="head"><span class="num">5</span><h3>De-identify — apply the policy</h3></div>
+  <div class="body">
+    <p class="lead">Transform the table in checkpointed chunks; survives interruption and drive moves; writes the reversible crosswalk.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>The run report: <b>12 columns processed</b>, <b>239 reversible crosswalk rows</b>, and a per-column tally (pseudonymize/generalize/redact, rows changed). Re-running resumes from checkpoints rather than recomputing.</p></div>
+      <div><h4>How it works</h4><p>Large files are sliced into chunks under <code>work/</code>; each chunk is a checkpoint, so a killed run — or the drive moved to another machine — resumes where it stopped. Optional parallel workers. Output, encrypted crosswalk, manifest and audit entry are all written.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/05_deidentify.png" alt="De-identify tab: run summary with per-column actions" loading="lazy"></figure>
+  <figcaption>Tab 5 — De-identify. Chunked, resumable, optionally parallel; per-column change summary.</figcaption>
+</section>
+
+<!-- 6 REVIEW -->
+<section id="f-review" class="feature">
+  <div class="head"><span class="num">6</span><h3>Review — original vs de-identified</h3></div>
+  <div class="body">
+    <p class="lead">A reviewer inspects the transform side-by-side and either approves or returns the job.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>The <code>patient_name</code> column before and after: <em>Jane&nbsp;Ng</em> → <code>NAM-581e9f…</code>, each real name replaced by a stable keyed token. Pick any column and page through all rows.</p></div>
+      <div><h4>How it works</h4><p>Review reads the finished output through a bounded reader (it never loads a huge file whole). <b>Approve</b> / <b>Return to de-identifier</b> is gated to the Reviewer role and recorded in the audit chain.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/06_review.png" alt="Review tab: side-by-side original vs de-identified names" loading="lazy"></figure>
+  <figcaption>Tab 6 — Review. Side-by-side diff with the reviewer decision controls.</figcaption>
+</section>
+
+<!-- 7 SDC -->
+<section id="f-sdc" class="feature">
+  <div class="head"><span class="num">7</span><h3>Disclosure control — measure &amp; reduce risk</h3></div>
+  <div class="body">
+    <p class="lead">Optional statistical disclosure control with a hard export gate on your thresholds.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>Quasi-identifiers <code>dob, postal_code, procedure_date</code> selected, target <b>k = 5</b>. A suppression preview shows the effect before you commit: k-anonymity <b>before k=1</b> → <b>after k=40</b>, uniques 40 → 0.</p></div>
+      <div><h4>How it works</h4><p>Measures: k-anonymity, l-diversity, sample-uniqueness (SUDA-lite), individual risk (sdcMicro), and DCR linkage risk. Transforms (all opt-in): suppression, recode, top/bottom coding, microaggregation, PRAM, noise (Gaussian / DP-style Laplace), and marginal synthesis. Export can be <b>blocked</b> below a k / max-risk threshold.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/07_sdc.png" alt="Disclosure control tab: measures and a suppression preview" loading="lazy"></figure>
+  <figcaption>Tab 7 — Disclosure control. Risk measures plus a preview-then-apply transform loop.</figcaption>
+</section>
+
+<!-- 8 AUDIT -->
+<section id="f-audit" class="feature">
+  <div class="head"><span class="num">8</span><h3>Audit — tamper-evident trail</h3></div>
+  <div class="body">
+    <p class="lead">Every action is appended to a hash-chained log; the manifest fingerprints every file.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p><b>Chain OK (6 entries)</b> — project_create, import (with the input SHA), detect (counts of outliers/free-text, PF on). The file manifest lists the input and the de-identified output, each with its SHA-256.</p></div>
+      <div><h4>How it works</h4><p>Each entry stores the previous entry's hash, so any edit to a past line breaks verification. <b>Verify chain integrity</b> re-walks the chain and reports OK or the first broken link.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/08_audit.png" alt="Audit tab: hash-chain verified and SHA-256 manifest" loading="lazy"></figure>
+  <figcaption>Tab 8 — Audit. Verified hash chain and the SHA-256 file manifest.</figcaption>
+</section>
+
+<!-- 9 SIGNOFF -->
+<section id="f-signoff" class="feature">
+  <div class="head"><span class="num">9</span><h3>Sign-off — signatures, handoff &amp; certificate</h3></div>
+  <div class="body">
+    <p class="lead">Each person signs their stage; the signed bundle passes between machines; a certificate is emitted.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>The de-identifier has signed the <code>deidentified</code> stage, and a de-identification certificate has been generated (project, stage, policy columns, manifest SHA, audit <code>ok: true</code>). The human-readable PDF is ready to download.</p></div>
+      <div><h4>How it works</h4><p>Signing uses a per-user ed25519 key; the public key travels in the bundle so the other machine can verify it (signed handoff). The certificate + full report render <b>offline in pure R</b> — no pandoc, no LaTeX, no network.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/09_signoff.png" alt="Sign-off tab: signed stage, handoff bundle, and certificate JSON" loading="lazy"></figure>
+  <figcaption>Tab 9 — Sign-off. Per-user signatures, signed handoff bundle, and the certificate/report.</figcaption>
+</section>
+
+<!-- DOCUMENTS -->
+<section id="f-docs" class="feature">
+  <div class="head"><span class="num">10</span><h3>Documents — PDF &amp; XML/ECG redaction</h3></div>
+  <div class="body">
+    <p class="lead">True redaction for PDFs and header-PHI scrubbing for XML, including vendor ECG — with the waveform preserved.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>A Philips SierraECG file scrubbed: the profile is auto-detected, header PHI (patient name, acquirer) is pseudonymized/redacted per the findings table, the output is written, and a <b>“waveform preserved”</b> badge confirms the signal is untouched.</p></div>
+      <div><h4>How it works</h4><p>PDFs are rasterized, the PII regions painted, and the file flattened to image-only so the underlying text layer is <b>removed, not just covered</b> (a re-OCR check confirms it). XML is tree-walked for generic, HL7 CDA/FHIR, and Philips/GE ECG profiles, scrubbing demographic/test headers while leaving the waveform bytes intact.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/10_documents.png" alt="Documents tab: Philips ECG scrub with waveform preserved" loading="lazy"></figure>
+  <figcaption>Documents — PDF/XML/ECG. Profile-aware header scrub with per-xpath findings; waveform payload preserved.</figcaption>
+</section>
+
+<!-- BATCH -->
+<section id="f-batch" class="feature">
+  <div class="head"><span class="num">11</span><h3>Batch — many files at once</h3></div>
+  <div class="body">
+    <p class="lead">Run a whole folder through the same pipelines into one project.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>A folder of mixed inputs processed: two ECG XMLs scrubbed (<code>xml_scrub</code>), and the CSV correctly <b>skipped</b> because its output already exists — the run is idempotent.</p></div>
+      <div><h4>How it works</h4><p>Each file is routed by type (CSV/XLSX → table engine, PDF → redaction, XML/ECG → scrub) into the project's outputs, merged crosswalk, manifest and audit. It is fail-soft (a bad file is logged, the run continues), idempotent (<code>--force</code> to redo), and parallel.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/11_batch.png" alt="Batch tab: per-item results with type routing" loading="lazy"></figure>
+  <figcaption>Batch. Per-item status with type routing, idempotent skips, and a downloadable summary.</figcaption>
+</section>
+
+<!-- IMPROVEMENT -->
+<section id="f-improve" class="feature">
+  <div class="head"><span class="num">12</span><h3>Improvement — feedback-driven tuning</h3></div>
+  <div class="body">
+    <p class="lead">Learn from identifiers missed in earlier runs, review a suggested fix, and apply it — versioned and reversible.</p>
+    <div class="two">
+      <div><h4>What you're seeing</h4><p>Mark a missed value or ingest a ground-truth file to measure recall; the tool diagnoses <em>why</em> each miss happened and proposes a fix — a threshold change, a watchlist literal, per-column force-detectors, or a learned regex.</p></div>
+      <div><h4>How it works</h4><p>A reviewer approves before anything changes; applying is versioned and audited (and revertible). Captured raw values are AEAD-encrypted and project-scoped; the optional cross-project register is <b>aggregate-only</b> and never stores a literal. Both cross-project options default off.</p></div>
+    </div>
+  </div>
+  <figure><img src="screenshots/12_improvement.png" alt="Improvement tab: auto-tuning controls" loading="lazy"></figure>
+  <figcaption>Improvement. Capture → diagnose → suggest → reviewer-approve → apply (reversible).</figcaption>
+</section>
+
+<hr class="div">
+
+<section id="hood">
+  <h2>Under the hood</h2>
+  <p class="lead">The tabs above are a thin layer over a pure-R core; the cryptography and detection are the same primitives whether you use the UI, the batch CLI, or call the functions directly.</p>
+  <div class="grid2">
+    <div class="card">
+      <h3>Cryptography</h3>
+      <div class="kv">
+        <b>Pseudonyms</b><span>Keyed HMAC-SHA-256 tokens; stable per key, isolated across project keys, linkable under a global key.</span>
+        <b>FPE</b><span>Keyed Feistel that preserves an ID's shape and decrypts back; falls back to a pseudonym beyond its domain.</span>
+        <b>Crosswalk</b><span>Original↔token map encrypted with libsodium secretbox (AEAD); re-identification needs the key.</span>
+        <b>Signatures</b><span>ed25519 per-user sign/verify for stage sign-off and the handoff bundle.</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Detection &amp; engine</h3>
+      <div class="kv">
+        <b>Validators</b><span>NRIC/FIN checksum, Luhn, phone, email, dates, postal, MRN, serials.</span>
+        <b>Profiling</b><span>Shape + content signatures surface misplaced identifiers and structural outliers.</span>
+        <b>Free text</b><span>Privacy Filter (ONNX token classifier) by default, out-of-process; optional Presidio/LLM backends off by default.</span>
+        <b>Resilience</b><span>Chunked checkpoints give resume + parallelism; nothing touches the network at runtime.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="verify">
+  <h2>Verification</h2>
+  <p class="lead">The repo ships a headless regression suite that exercises every feature above on the synthetic data.</p>
+  <div class="card">
+<pre><span class="c"># from the repo root — 4 suites, 121 checks</span>
+Rscript tools/smoke/run_all.R</pre>
+    <p class="small" style="margin-bottom:0">It covers crypto, detectors, profiling/misplaced-PII, all transforms, date-shift, the audit chain, SDC metrics + gate + transforms, XML/ECG scrub across all five profiles (waveform preserved), PDF true redaction, the checkpointed pipeline with resume + parallel, signed handoff, the batch runner, and the Privacy Filter. On the deployed bundle, <code>tools\verify.bat</code> runs a self-check and prints <code>VERIFY PASS</code>.</p>
+  </div>
+</section>
+
+<div class="callout warn">
+  <p><b>Not for clinical or diagnostic use.</b> This is an educational / research governance tool. The data controller remains responsible for confirming the adequacy of de-identification before any release, under PDPA, HIPAA Safe Harbor, and SingHealth/IRB requirements. Never load real patient data into a shared or untrusted environment.</p>
+</div>
+
+</main>
+</div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>Structured De-identification System — user guide - <span class="small">every screenshot is a live run on synthetic data.</span></div>
+    <div class="tag">Air-gapped · R + Shiny · pure-R core</div>
+  </div>
+</footer>
+
+</body>
+</html>

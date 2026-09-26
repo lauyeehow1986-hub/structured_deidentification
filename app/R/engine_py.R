@@ -344,12 +344,35 @@ se_jev_frame <- function(r) {
              reasons = reasons, stringsAsFactors = FALSE)
 }
 
+#' Engine spans for slm:jev to judge, one data.frame (start, end, type,
+#' detector) per text: every Privacy Filter span plus Presidio `person` spans,
+#' slm_jev's release configuration (its decision 0009). The judge decides on
+#' each one; an engine span is never accepted just because an engine found it.
+#' NULL when there is nothing to pass.
+se_jev_candidates <- function(n, pf = NULL, ner = NULL) {
+  keep <- c("row", "start", "end", "type", "detector")
+  parts <- list()
+  if (!is.null(pf) && nrow(pf)) parts$pf <- pf[, keep, drop = FALSE]
+  if (!is.null(ner) && nrow(ner))
+    parts$ner <- ner[ner$type %in% "person", keep, drop = FALSE]
+  all <- do.call(rbind, c(list(.se_empty_ner()[, keep]), unname(parts)))
+  if (!nrow(all)) return(NULL)
+  lapply(seq_len(n), function(i) {
+    x <- all[all$row == i, keep[-1], drop = FALSE]
+    rownames(x) <- NULL
+    x
+  })
+}
+
 #' slm:jev scan of a character vector (out-of-process). Returns the findings
-#' span schema plus needs_review/reasons. When slm_jev is missing or the scan
-#' fails it returns an empty frame with attr(, "error") set, and with
-#' strict = TRUE it stops instead: a de-identification run must not quietly
-#' lose the detector the reviewer approved.
-se_jev_scan <- function(texts, kind = "text", column = NULL, strict = FALSE) {
+#' span schema plus needs_review/reasons. `candidates` (from
+#' se_jev_candidates) adds engine spans for the judge to decide on. When
+#' slm_jev is missing or the scan fails it returns an empty frame with
+#' attr(, "error") set, and with strict = TRUE it stops instead: a
+#' de-identification run must not quietly lose the detector the reviewer
+#' approved.
+se_jev_scan <- function(texts, kind = "text", column = NULL, strict = FALSE,
+                        candidates = NULL) {
   fail <- function(msg) {
     if (strict) stop("slm:jev: ", msg, call. = FALSE)
     warning("slm:jev: ", msg, call. = FALSE)
@@ -363,6 +386,11 @@ se_jev_scan <- function(texts, kind = "text", column = NULL, strict = FALSE) {
                   slmjev_root = cfg$root, llama_server = cfg$llama_server,
                   model = cfg$model, calibration = cfg$calibration)
   if (!is.null(column)) payload$column <- column
+  if (!is.null(candidates)) {
+    if (length(candidates) != length(texts))
+      return(fail("candidates must have one entry per text"))
+    payload$candidates <- candidates
+  }
   r <- .se_py_run("jev", payload)
   if (is.null(r)) return(fail("no response from the engine"))
   if (is.list(r) && !is.data.frame(r) && !is.null(r$error))
@@ -426,20 +454,19 @@ se_detect_freetext <- function(df, ftcols = se_freetext_columns(names(df)),
       if (nrow(sp)) add(i, cn, sp$start, sp$end, sp$match, sp$type,
                         sp$identifier, sp$confidence, sp$detector)
     }
-    # Privacy Filter (default), whole column vector (guards itself when absent)
-    if (isTRUE(use_pf)) {
-      ps <- tryCatch(se_pf_scan(vals), error = function(e) NULL)
-      if (!is.null(ps) && nrow(ps))
-        add(ps$row, cn, ps$start, ps$end, ps$match, ps$type,
-            ps$identifier, ps$confidence, ps$detector)
-    }
-    # legacy offline NER (opt-in)
-    if (isTRUE(use_ner)) {
-      ns <- tryCatch(se_py_scan(vals), error = function(e) NULL)
-      if (!is.null(ns) && nrow(ns))
-        add(ns$row, cn, ns$start, ns$end, ns$match, ns$type,
-            ns$identifier, ns$confidence, ns$detector)
-    }
+    # Privacy Filter (default), whole column vector (guards itself when absent).
+    # slm:jev also judges its spans, so it runs for jev even when not shown.
+    ps <- if (isTRUE(use_pf) || isTRUE(use_jev))
+      tryCatch(se_pf_scan(vals), error = function(e) NULL)
+    if (isTRUE(use_pf) && !is.null(ps) && nrow(ps))
+      add(ps$row, cn, ps$start, ps$end, ps$match, ps$type,
+          ps$identifier, ps$confidence, ps$detector)
+    # legacy offline NER (opt-in); its person spans go to slm:jev once probed
+    ns <- if (isTRUE(use_ner) || isTRUE(use_jev))
+      tryCatch(se_py_scan(vals), error = function(e) NULL)
+    if (isTRUE(use_ner) && !is.null(ns) && nrow(ns))
+      add(ns$row, cn, ns$start, ns$end, ns$match, ns$type,
+          ns$identifier, ns$confidence, ns$detector)
     # legacy local LLM (opt-in)
     if (isTRUE(use_llm)) {
       ls <- tryCatch(se_llm_scan(vals), error = function(e) NULL)
@@ -449,7 +476,8 @@ se_detect_freetext <- function(df, ftcols = se_freetext_columns(names(df)),
     }
     # slm:jev calibrated judge (opt-in); an error is reported, not swallowed
     if (isTRUE(use_jev)) {
-      js <- tryCatch(suppressWarnings(se_jev_scan(vals)),
+      js <- tryCatch(suppressWarnings(
+                       se_jev_scan(vals, candidates = se_jev_candidates(length(vals), ps, ns))),
                      error = function(e) structure(.se_empty_jev(),
                                                    error = conditionMessage(e)))
       if (!is.null(attr(js, "error"))) jev_err <- c(jev_err, attr(js, "error"))

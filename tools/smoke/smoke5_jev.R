@@ -45,7 +45,7 @@ d <- se_dedup_findings(data.frame(
 T("dedup keeps the needs_review flag of a duplicate", nrow(d) == 1L && d$needs_review)
 
 # redact_freetext: unsure slm:jev spans bypass the confidence floor
-fake <- function(texts, kind = "text", column = NULL, strict = FALSE) {
+fake <- function(texts, kind = "text", column = NULL, strict = FALSE, candidates = NULL) {
   r <- jf; r$row <- 1L; r[r$row <= length(texts), , drop = FALSE]
 }
 real_scan <- se_jev_scan
@@ -63,7 +63,8 @@ out2 <- se_deidentify_table(df, pol, key = se_derive_key("k", "s"))$data$note
 T("a reviewer reject releases an unsure span", grepl("HIV", out2) && !grepl("Ward 5", out2))
 
 # a failed scan: warning + attr in detection; hard stop at export
-assign("se_jev_scan", function(texts, kind = "text", column = NULL, strict = FALSE) {
+assign("se_jev_scan", function(texts, kind = "text", column = NULL, strict = FALSE,
+                               candidates = NULL) {
   if (strict) stop("slm:jev: boom", call. = FALSE)
   structure(se_jev_frame(list()), error = "boom")
 }, envir = globalenv())
@@ -72,6 +73,39 @@ T("detection reports a failed scan in attr(jev_error)", identical(attr(ff, "jev_
 T("export stops when slm:jev fails (never exports un-scanned)",
   inherits(tryCatch(se_deidentify_table(df, pol, key = se_derive_key("k", "s")),
                     error = function(e) e), "error"))
+assign("se_jev_scan", real_scan, envir = globalenv())
+
+# engine spans go to the judge as candidates: all Privacy Filter spans plus
+# Presidio person spans, one list per text (slm_jev decision 0009)
+eng <- function(row, start, end, type, detector)
+  data.frame(row = row, start = start, end = end, match = "x", type = type,
+             identifier = "name", detector = detector, confidence = 0.85,
+             stringsAsFactors = FALSE)
+cand <- se_jev_candidates(3L, pf = eng(c(1L, 3L), c(4L, 1L), c(13L, 5L), "name", "pf"),
+                          ner = eng(c(1L, 1L), c(4L, 43L), c(13L, 48L),
+                                    c("person", "organization"), "ner:presidio"))
+T("candidates: one entry per text", length(cand) == 3L)
+T("candidates: PF spans and Presidio persons only",
+  nrow(cand[[1]]) == 2L && !any(cand[[1]]$start == 43L) && nrow(cand[[2]]) == 0L &&
+  nrow(cand[[3]]) == 1L)
+cj <- as.character(jsonlite::toJSON(cand, auto_unbox = TRUE))
+T("candidates: JSON is an array of span arrays",
+  startsWith(cj, '[[{"start":4,"end":13,"type":"name","detector":"pf"}') &&
+  grepl(",[],", cj, fixed = TRUE))
+T("no engine spans -> no candidates", is.null(se_jev_candidates(2L, NULL, NULL)))
+seen <- NULL
+assign("se_jev_scan", function(texts, kind = "text", column = NULL, strict = FALSE,
+                               candidates = NULL) { seen <<- candidates; se_jev_frame(list()) },
+       envir = globalenv())
+real_pf <- se_pf_scan
+assign("se_pf_scan", function(texts) eng(1L, 4L, 13L, "name", "pf"), envir = globalenv())
+invisible(se_detect_freetext(df, "note", use_pf = FALSE, use_jev = TRUE))
+T("detection passes PF spans to slm:jev even when PF is not shown",
+  length(seen) == 1L && identical(seen[[1]]$start, 4L))
+seen <- NULL
+invisible(se_deidentify_table(df, pol, key = se_derive_key("k", "s")))
+T("export passes the same candidates", length(seen) == 1L && identical(seen[[1]]$end, 13L))
+assign("se_pf_scan", real_pf, envir = globalenv())
 assign("se_jev_scan", real_scan, envir = globalenv())
 
 old_root <- Sys.getenv("SLMJEV_ROOT"); old_opt <- options(se.slmjev_root = tempfile())

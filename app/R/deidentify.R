@@ -263,15 +263,18 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
           types_allow <- fo$types    %||% NULL          # NULL = all types
           rejects     <- fo$rejects  %||% character(0)  # "col\ttype\ttolower(match)"
           pf_by_row <- NULL
-          if (isTRUE(fo$use_pf)) {
-            ps <- tryCatch(se_pf_scan(orig), error = function(e) NULL)
-            if (!is.null(ps) && nrow(ps)) pf_by_row <- split(ps, ps$row)
-          }
+          ps <- if (isTRUE(fo$use_pf) || isTRUE(fo$use_jev))
+            tryCatch(se_pf_scan(orig), error = function(e) NULL)
+          if (isTRUE(fo$use_pf) && !is.null(ps) && nrow(ps))
+            pf_by_row <- split(ps, ps$row)
           # slm:jev (opt-in): strict, so an export never silently runs without
-          # the detector the reviewer approved
+          # the detector the reviewer approved. It judges the same engine spans
+          # (Privacy Filter, Presidio persons) as at detection.
           jev_by_row <- NULL
           if (isTRUE(fo$use_jev)) {
-            js <- se_jev_scan(orig, strict = TRUE)
+            ns <- tryCatch(se_py_scan(orig), error = function(e) NULL)
+            js <- se_jev_scan(orig, strict = TRUE,
+                              candidates = se_jev_candidates(length(orig), ps, ns))
             if (nrow(js)) jev_by_row <- split(js, js$row)
           }
           keepcols <- c("start", "end", "match", "type", "identifier",

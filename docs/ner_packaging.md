@@ -293,6 +293,15 @@ non-loopback socket itself and talks only to the llama-server it starts on
 `_forbid_network()`. The runner imports slm_jev from the checkout into the
 bundled interpreter; slm_jev needs only the standard library at run time.
 
+slm:jev also judges other engines' spans. Every Privacy Filter span and every
+Presidio `person` span (once *Enable offline NER* has probed Presidio) goes to
+it as an extra candidate (`se_jev_candidates()`). This is slm_jev's release
+configuration (`jev+pf+ner.person`, its decision 0009). The judge decides on
+each span like one of its own proposals, so an engine span is never accepted
+just because an engine found it. Privacy Filter runs for slm:jev even when its
+own box is unticked; its spans are then judged but not shown on their own.
+The export passes the same candidates as detection.
+
 Its identifiers map onto the free-text types: `national_id` → `nric`,
 `case_visit` → `case`, `device` → `serial`, `other_id` → `other`, and every SHI
 category (HIV/STI, mental health, ...) → `sensitive`. `tools/smoke/smoke5_jev.R`

@@ -261,6 +261,116 @@ se_llm_scan <- function(texts) {
 }
 
 # ---------------------------------------------------------------------------
+# Optional slm:jev pass — OFF BY DEFAULT. slm_jev (a separate checkout) proposes
+# candidate spans with rules + shapes and asks a small local GGUF model typed
+# questions, reading calibrated probabilities from option-token logprobs. It
+# FAILS CLOSED: an unsure span comes back needs_review = TRUE and is redacted
+# unless the reviewer rejects it (it bypasses the confidence floor). A failed
+# scan is an error, never an empty result. Its only socket is loopback to the
+# llama-server it starts itself.
+# ---------------------------------------------------------------------------
+
+#' slm_jev paths, discovered passively (file existence only).
+#' root: options(se.slmjev_root) / SLMJEV_ROOT, else <bundle>/slmjev.
+#' llama-server: options(se.slmjev_llama_server) / SLMJEV_LLAMA_SERVER, else
+#'   <bundle>/bin/llama/llama-server(.exe). model: options(se.slmjev_model) /
+#'   SLMJEV_JUDGE_MODEL, else <root>/models/judge.gguf. calibration:
+#'   options(se.slmjev_calibration) / SLMJEV_CALIBRATION, else
+#'   <root>/models/calibration.json (it must be fitted for that model).
+se_jev_config <- function() {
+  root <- getOption("se.slmjev_root", Sys.getenv("SLMJEV_ROOT", ""))
+  if (!nzchar(root)) root <- file.path(se_bundle_root(), "slmjev")
+  srv <- getOption("se.slmjev_llama_server", Sys.getenv("SLMJEV_LLAMA_SERVER", ""))
+  if (!nzchar(srv)) {
+    cand <- file.path(se_bundle_root(), "bin", "llama",
+                      c("llama-server.exe", "llama-server"))
+    hit <- cand[file.exists(cand)]
+    if (length(hit)) srv <- hit[1]
+  }
+  model <- getOption("se.slmjev_model", Sys.getenv("SLMJEV_JUDGE_MODEL", ""))
+  if (!nzchar(model)) model <- file.path(root, "models", "judge.gguf")
+  cal <- getOption("se.slmjev_calibration", Sys.getenv("SLMJEV_CALIBRATION", ""))
+  if (!nzchar(cal)) cal <- file.path(root, "models", "calibration.json")
+  need <- c(slmjev = file.path(root, "slmjev", "engine.py"), llama_server = srv,
+            model = model, calibration = cal)
+  miss <- names(need)[!nzchar(need) | !file.exists(need)]
+  list(root = normalizePath(root, "/", mustWork = FALSE),
+       llama_server = if (nzchar(srv)) normalizePath(srv, "/", mustWork = FALSE) else srv,
+       model = normalizePath(model, "/", mustWork = FALSE),
+       calibration = normalizePath(cal, "/", mustWork = FALSE),
+       available = !length(miss), missing = miss)
+}
+
+# slm_jev identifier -> this app's free-text `type` (the ft_types vocabulary)
+.se_jev_types <- c(
+  name = "name", national_id = "nric", mrn = "mrn", case_visit = "case",
+  address = "address", postal_code = "postal", phone = "phone", fax = "phone",
+  email = "email", dob = "date", date_of_death = "date", device = "serial",
+  biometric = "biometric", photo = "photo", other_id = "other",
+  hiv_sti = "sensitive", mental_health = "sensitive", substance_use = "sensitive",
+  genetic = "sensitive", reproductive_sexual = "sensitive",
+  other_sensitive = "sensitive")
+.se_ft_types <- c("name", "address", "email", "phone", "date", "postal", "nric",
+                  "passport", "mrn", "case", "ip", "url", "account", "secret",
+                  "serial", "biometric", "photo", "other", "sensitive")
+
+.se_empty_jev <- function() {
+  e <- .se_empty_ner()
+  e$needs_review <- logical(0); e$reasons <- character(0)
+  e
+}
+
+#' Parsed slm_jev records -> the findings span schema plus needs_review/reasons.
+#' Pure (no Python), so it is testable headlessly.
+se_jev_frame <- function(r) {
+  if (is.null(r) || !is.data.frame(r) || !nrow(r)) return(.se_empty_jev())
+  ident <- as.character(r$identifier)
+  jt <- as.character(r$type)
+  # keep a type this app already knows (rule hints: nric, postal, case, ...);
+  # else map the judged identifier; an unlabelled review span is "other"
+  type <- ifelse(!is.na(jt) & jt %in% .se_ft_types, jt,
+                 unname(.se_jev_types[ident]))
+  type[is.na(type)] <- "other"
+  conf <- suppressWarnings(as.numeric(r$confidence))
+  conf[is.na(conf)] <- 0      # judge failed: no score, but needs_review holds it
+  rev <- as.logical(r$needs_review)
+  rev[is.na(rev)] <- TRUE
+  reasons <- if (is.null(r$reasons)) rep("", nrow(r)) else
+    vapply(r$reasons, function(x) paste(unlist(x), collapse = ";"), character(1))
+  data.frame(row = as.integer(r$row), start = as.integer(r$start),
+             end = as.integer(r$end), match = as.character(r$match), type = type,
+             identifier = ifelse(is.na(ident), "other_id", ident),
+             detector = "slm:jev", confidence = conf, needs_review = rev,
+             reasons = reasons, stringsAsFactors = FALSE)
+}
+
+#' slm:jev scan of a character vector (out-of-process). Returns the findings
+#' span schema plus needs_review/reasons. When slm_jev is missing or the scan
+#' fails it returns an empty frame with attr(, "error") set, and with
+#' strict = TRUE it stops instead: a de-identification run must not quietly
+#' lose the detector the reviewer approved.
+se_jev_scan <- function(texts, kind = "text", column = NULL, strict = FALSE) {
+  fail <- function(msg) {
+    if (strict) stop("slm:jev: ", msg, call. = FALSE)
+    warning("slm:jev: ", msg, call. = FALSE)
+    structure(.se_empty_jev(), error = msg)
+  }
+  if (is.null(se_py_binary())) return(fail("bundled Python interpreter not found"))
+  cfg <- se_jev_config()
+  if (!isTRUE(cfg$available))
+    return(fail(paste("missing", paste(cfg$missing, collapse = ", "))))
+  payload <- list(texts = I(as.character(texts)), kind = kind,
+                  slmjev_root = cfg$root, llama_server = cfg$llama_server,
+                  model = cfg$model, calibration = cfg$calibration)
+  if (!is.null(column)) payload$column <- column
+  r <- .se_py_run("jev", payload)
+  if (is.null(r)) return(fail("no response from the engine"))
+  if (is.list(r) && !is.data.frame(r) && !is.null(r$error))
+    return(fail(as.character(r$error)))
+  se_jev_frame(r)
+}
+
+# ---------------------------------------------------------------------------
 # Free-text detection = deterministic rules (always) + optional offline NER +
 # optional local LLM, merged into one findings table for the review screen.
 # Pure enough to test headlessly: with use_ner/use_llm FALSE it is rules-only,
@@ -278,6 +388,9 @@ se_freetext_columns <- function(cols) {
 se_dedup_findings <- function(df) {
   if (is.null(df) || !nrow(df)) return(df)
   k <- paste(df$row, df$column, tolower(df$match), df$type, sep = "\t")
+  # a duplicate keeps the flag of any copy slm:jev was unsure of (fail closed)
+  if (!is.null(df$needs_review))
+    df$needs_review <- ave(df$needs_review %in% TRUE, k, FUN = any)
   df <- df[order(k, -df$confidence), , drop = FALSE]
   df <- df[!duplicated(paste(df$row, df$column, tolower(df$match), df$type,
                              sep = "\t")), , drop = FALSE]
@@ -287,19 +400,23 @@ se_dedup_findings <- function(df) {
 }
 
 #' Scan free-text columns of a data.frame. Returns
-#' data.frame(row, column, match, type, confidence, detector).
+#' data.frame(row, column, match, type, confidence, detector, needs_review).
+#' needs_review is TRUE only for slm:jev spans it is unsure of; a failed slm:jev
+#' scan is reported in attr(, "jev_error").
 se_detect_freetext <- function(df, ftcols = se_freetext_columns(names(df)),
                                use_pf = TRUE, use_ner = FALSE, use_llm = FALSE,
-                               detectors = se_detectors()) {
+                               detectors = se_detectors(), use_jev = FALSE) {
   cols <- intersect(ftcols, names(df))
   out <- list()
+  jev_err <- NULL
   add <- function(row, column, start, end, match, type, identifier,
-                  confidence, detector) {
+                  confidence, detector, needs_review = FALSE) {
     if (length(match))
       out[[length(out) + 1L]] <<- data.frame(
         row = row, column = column, start = start, end = end, match = match,
         type = type, identifier = identifier, confidence = confidence,
-        detector = detector, stringsAsFactors = FALSE)
+        detector = detector, needs_review = needs_review,
+        stringsAsFactors = FALSE)
   }
   for (cn in cols) {
     vals <- as.character(df[[cn]])
@@ -330,11 +447,24 @@ se_detect_freetext <- function(df, ftcols = se_freetext_columns(names(df)),
         add(ls$row, cn, ls$start, ls$end, ls$match, ls$type,
             ls$identifier, ls$confidence, ls$detector)
     }
+    # slm:jev calibrated judge (opt-in); an error is reported, not swallowed
+    if (isTRUE(use_jev)) {
+      js <- tryCatch(suppressWarnings(se_jev_scan(vals)),
+                     error = function(e) structure(.se_empty_jev(),
+                                                   error = conditionMessage(e)))
+      if (!is.null(attr(js, "error"))) jev_err <- c(jev_err, attr(js, "error"))
+      if (nrow(js))
+        add(js$row, cn, js$start, js$end, js$match, js$type,
+            js$identifier, js$confidence, js$detector, js$needs_review)
+    }
   }
   res <- if (length(out)) do.call(rbind, out) else
     data.frame(row = integer(0), column = character(0), start = integer(0),
                end = integer(0), match = character(0), type = character(0),
                identifier = character(0), confidence = numeric(0),
-               detector = character(0), stringsAsFactors = FALSE)
-  se_dedup_findings(res)
+               detector = character(0), needs_review = logical(0),
+               stringsAsFactors = FALSE)
+  res <- se_dedup_findings(res)
+  if (length(jev_err)) attr(res, "jev_error") <- unique(jev_err)
+  res
 }

@@ -267,16 +267,32 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
             ps <- tryCatch(se_pf_scan(orig), error = function(e) NULL)
             if (!is.null(ps) && nrow(ps)) pf_by_row <- split(ps, ps$row)
           }
+          # slm:jev (opt-in): strict, so an export never silently runs without
+          # the detector the reviewer approved
+          jev_by_row <- NULL
+          if (isTRUE(fo$use_jev)) {
+            js <- se_jev_scan(orig, strict = TRUE)
+            if (nrow(js)) jev_by_row <- split(js, js$row)
+          }
           keepcols <- c("start", "end", "match", "type", "identifier",
-                        "detector", "confidence")
+                        "detector", "confidence", "needs_review")
           vapply(seq_along(orig), function(i) {
             cell <- orig[i]
             if (is.na(cell) || !nzchar(cell)) return(cell)
-            sp <- se_scan_text(cell, detectors)[, keepcols, drop = FALSE]
+            sp <- se_scan_text(cell, detectors)
+            sp$needs_review <- rep(FALSE, nrow(sp))
+            sp <- sp[, keepcols, drop = FALSE]
             if (!is.null(pf_by_row)) {
               pr <- pf_by_row[[as.character(i)]]
-              if (!is.null(pr) && nrow(pr))
+              if (!is.null(pr) && nrow(pr)) {
+                pr$needs_review <- rep(FALSE, nrow(pr))
                 sp <- rbind(sp, pr[, keepcols, drop = FALSE])
+              }
+            }
+            if (!is.null(jev_by_row)) {
+              jr <- jev_by_row[[as.character(i)]]
+              if (!is.null(jr) && nrow(jr))
+                sp <- rbind(sp, jr[, keepcols, drop = FALSE])
             }
             if (!nrow(sp)) return(cell)
             # Per-identifier confidence floor (reviewer-approved threshold
@@ -288,7 +304,9 @@ se_deidentify_table <- function(df, policy, key, detectors = se_detectors()) {
               if (any(hit)) thr[hit] <- unlist(ov[sp$identifier[hit]],
                                                use.names = FALSE)
             }
-            sp <- sp[sp$confidence >= thr, , drop = FALSE]
+            # fail closed: a span slm:jev was unsure of passes the floor
+            sp <- sp[sp$confidence >= thr | sp$needs_review %in% TRUE, ,
+                     drop = FALSE]
             if (!is.null(types_allow))
               sp <- sp[sp$type %in% types_allow, , drop = FALSE]
             if (length(rejects) && nrow(sp)) {

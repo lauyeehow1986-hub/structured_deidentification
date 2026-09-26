@@ -262,6 +262,52 @@ for a human, never as ground truth.
 
 ---
 
+## 3. Optional: slm:jev (calibrated local judge)
+
+[slm_jev](https://github.com/lauyeehow1986-hub/slm_jev) is a separate offline
+detector: rules and a shape proposer suggest candidate spans, and a small local
+GGUF model answers typed questions about each one ("which identifier is this, if
+any?"). Probabilities are read from option-token logprobs and calibrated on
+synthetic data. It never generates replacement text. It is **off by default**:
+tick *Use slm:jev* in *Advanced*, or pass `--jev` to `batch_cli.R`.
+
+It **fails closed**, unlike the other engines:
+
+- An unsure span comes back with `needs_review = TRUE`. It passes the confidence
+  floor and is redacted unless a reviewer rejects it.
+- A scan that fails (missing checkout, model or calibration, or a crash) raises a
+  notification in the UI and stops the export. It is never read as "no PII".
+
+Paths are discovered passively (file existence only):
+
+| setting | option / environment variable | default |
+|---|---|---|
+| checkout | `se.slmjev_root` / `SLMJEV_ROOT` | `<bundle>/slmjev` |
+| llama-server | `se.slmjev_llama_server` / `SLMJEV_LLAMA_SERVER` | `<bundle>/bin/llama/llama-server.exe` |
+| model | `se.slmjev_model` / `SLMJEV_JUDGE_MODEL` | `<root>/models/judge.gguf` |
+| calibration | `se.slmjev_calibration` / `SLMJEV_CALIBRATION` | `<root>/models/calibration.json` |
+
+The calibration file must be fitted for that model. slm_jev forbids every
+non-loopback socket itself and talks only to the llama-server it starts on
+`127.0.0.1` with a per-run key, so the `jev` runner mode does not call
+`_forbid_network()`. The runner imports slm_jev from the checkout into the
+bundled interpreter; slm_jev needs only the standard library at run time.
+
+Its identifiers map onto the free-text types: `national_id` → `nric`,
+`case_visit` → `case`, `device` → `serial`, `other_id` → `other`, and every SHI
+category (HIV/STI, mental health, ...) → `sensitive`. `tools/smoke/smoke5_jev.R`
+tests the R side on canned output and scans live when slm_jev is available.
+
+Cost: slm:jev runs once at detection and again at export (like Privacy Filter).
+On a 16 GB CPU laptop it measured about 60 s per 1k characters (p50) on synthetic
+notes, so use it on free-text columns of modest size, not bulk exports. Each
+process starts its own llama-server (about 2.3 GB RAM with the 1.7B Q4_K_M
+judge), so with parallel workers keep `workers x 2.3 GB` within the machine's
+memory. A failed export is shown in the app and audited as `deidentify_failed`;
+in batch mode the file is marked `error` and no output is written for it.
+
+---
+
 ## Behaviour when the engines are absent
 
 - No bundled interpreter → **Enable offline NER** reports "rules-only mode" and

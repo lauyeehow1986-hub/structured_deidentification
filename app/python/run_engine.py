@@ -18,9 +18,13 @@ Modes:
   llm   : stdin {"texts":[...],"backend":.} -> [ span, ... ]   (see detect_llm.py)
           backend "llamacpp" (socket-free, needs llama_bin+model_path) or
           "ollama" (loopback socket to a local Ollama).
+  jev   : stdin {"texts":[...],"slmjev_root":.,"llama_server":.,"model":.,
+                 "calibration":.}           -> [ span, ... ] | {"error": ...}
+          slm_jev's calibrated SLM judge (a separate checkout; see _jev below).
 
 stdout is ALWAYS a single JSON value; on any failure it degrades to an empty
-result so the caller falls back to rules-only.
+result so the caller falls back to rules-only -- except `jev`, which reports
+{"error": ...} so a failed judge is never mistaken for "no PII found".
 """
 
 import sys
@@ -66,6 +70,25 @@ def _probe():
             "onnx": out.get("onnxruntime", False) and out.get("tokenizers", False)}
 
 
+def _jev(req):
+    """slm_jev (detector "slm:jev"): rules + shape proposer + a calibrated local
+    SLM judge; review spans come back with needs_review=true. slm_jev is its own
+    checkout, found at req["slmjev_root"] or $SLMJEV_ROOT. It forbids every
+    non-loopback socket itself (slmjev.netguard) and talks only to the
+    llama-server it starts on 127.0.0.1 with a per-run key, so this mode does
+    NOT call _forbid_network (which would also block that loopback)."""
+    root = req.get("slmjev_root") or os.environ.get("SLMJEV_ROOT", "")
+    if not root or not os.path.isfile(os.path.join(root, "slmjev", "engine.py")):
+        return {"error": "slm_jev checkout not found (slmjev_root / SLMJEV_ROOT)"}
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from slmjev import engine
+        return engine.scan(req)
+    except Exception as e:  # reported, never swallowed into "no spans"
+        return {"error": "%s: %s" % (type(e).__name__, e)}
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     req = _read_request()
@@ -100,6 +123,8 @@ def main():
                 n_predict=int(req.get("n_predict", 512)),
                 ctx=int(req.get("ctx", 4096)),
                 batch=int(req.get("batch", 16)))
+        elif mode == "jev":
+            result = _jev(req)
     except Exception:
         result = {} if mode == "probe" else []
 

@@ -29,7 +29,7 @@ res <- se_batch_run(proj, plan, opts = list(
   workers = as.integer(getopt("--workers", "1")),
   out_format = getopt("--out-format", "csv"),
   force = getflag("--force"),
-  freetext_opts = list(use_pf = !getflag("--no-pf"),
+  freetext_opts = list(use_pf = !getflag("--no-pf"), use_jev = getflag("--jev"),
                        min_conf = as.numeric(getopt("--ft-min-conf", "0.5")),
                        types = NULL, rejects = character(0)),
   date_shift = getflag("--date-shift"),

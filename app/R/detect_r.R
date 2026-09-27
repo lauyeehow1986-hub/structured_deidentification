@@ -236,8 +236,8 @@ se_scan_text <- function(text, detectors = se_detectors()) {
 
 #' Drop spans that overlap a kept span, keeping the widest (then highest-
 #' confidence) span in each overlap cluster. Expects columns start,end,confidence.
-#' Used before applying replacements so an ambiguous bare-6-digit postal span and
-#' the anchored "Singapore NNNNNN" span covering it don't both get transformed.
+#' For picking one finding per region (display). NOT for redaction: a partial
+#' overlap's loser keeps its non-shared characters -- use se_merge_overlaps.
 se_dedup_overlaps <- function(sp) {
   if (is.null(sp) || !nrow(sp)) return(sp)
   ord <- order((sp$end - sp$start), sp$confidence, decreasing = TRUE)
@@ -249,6 +249,34 @@ se_dedup_overlaps <- function(sp) {
     if (!ovl) { keep[i] <- TRUE; occ[[length(occ) + 1L]] <- c(s, e) }
   }
   sp[keep, , drop = FALSE]
+}
+
+#' Merge overlapping or touching spans into their union, for REDACTION. Unlike
+#' se_dedup_overlaps (which drops the loser of a partial overlap and so leaves
+#' its non-shared characters in clear), every character any span covers stays
+#' covered. Each cluster keeps the row of its widest (then highest-confidence)
+#' member with start/end widened to the union; `exact` is TRUE when that union
+#' equals the member's own extent (callers use it to decide postal masking).
+#' Rows with NA or inverted offsets are dropped. Expects start,end[,confidence].
+se_merge_overlaps <- function(sp) {
+  if (is.null(sp) || !nrow(sp)) return(sp)
+  if (is.null(sp$confidence)) sp$confidence <- 1
+  sp <- sp[!is.na(sp$start) & !is.na(sp$end) & sp$end >= sp$start, , drop = FALSE]
+  if (!nrow(sp)) { sp$exact <- logical(0); return(sp) }
+  sp <- sp[order(sp$start, -sp$end), , drop = FALSE]
+  reach <- cummax(sp$end)
+  grp <- cumsum(c(TRUE, sp$start[-1] > reach[-nrow(sp)] + 1L))  # gap => new cluster
+  out <- lapply(split(seq_len(nrow(sp)), grp), function(ix) {
+    g <- sp[ix, , drop = FALSE]
+    row <- g[order(g$end - g$start, g$confidence, decreasing = TRUE)[1], , drop = FALSE]
+    us <- min(g$start); ue <- max(g$end)
+    row$exact <- row$start == us && row$end == ue
+    row$start <- us; row$end <- ue
+    row
+  })
+  out <- do.call(rbind, out)
+  rownames(out) <- NULL
+  out
 }
 
 .se_empty_spans <- function() {

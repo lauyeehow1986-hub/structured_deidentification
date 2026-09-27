@@ -97,6 +97,46 @@ subn <- cw[cw$column=="nric",]
 T("re-identify via crosswalk (token->original)", identical(subn$original[match(d$nric[1], subn$token)], df0$nric[1]))
 T("re-identify via FPE decrypt", identical(se_fpe(d$nric[1], key, mode="alnum_upper", tweak="natid", decrypt=TRUE), df0$nric[1]))
 
+sec("OVERLAPPING SPANS (redaction takes the union, fails closed)")
+# Synthetic: dots pad a run of digits, so any digit left in the output is an
+# original character that escaped redaction.
+ov_txt <- paste0(strrep(".", 9), "123456789012345678901", strrep(".", 10))  # digits = chars 10-30
+ov_sp  <- function(s, e, type, conf = 0.9) data.frame(start = s, end = e, type = type, confidence = conf)
+r1 <- se_redact_freetext_spans(ov_txt, rbind(ov_sp(10, 20, "name"), ov_sp(18, 30, "nric")))
+T("partial overlap (10-20 + 18-30): no original chars of either span survive",
+  !grepl("[0-9]", r1) && !grepl(substr(ov_txt, 10, 20), r1, fixed = TRUE) &&
+  !grepl(substr(ov_txt, 18, 30), r1, fixed = TRUE))
+T("partial overlap: one tag of the widest member over the union",
+  identical(r1, paste0(strrep(".", 9), "[NRIC]", strrep(".", 10))))
+r2 <- se_redact_freetext_spans(ov_txt, rbind(ov_sp(18, 30, "nric"), ov_sp(10, 20, "name", conf = 1)))
+T("partial overlap is order-independent (narrower span higher-confidence)", identical(r2, r1))
+T("touching spans (10-15 + 16-30) merge into one tag, no leak",
+  identical(se_redact_freetext_spans(ov_txt, rbind(ov_sp(10, 15, "name"), ov_sp(16, 30, "phone"))),
+            paste0(strrep(".", 9), "[PHONE]", strrep(".", 10))))
+T("transitive chain (10-14, 13-22, 21-30) redacts the whole run",
+  !grepl("[0-9]", se_redact_freetext_spans(ov_txt, rbind(ov_sp(10, 14, "name"), ov_sp(13, 22, "mrn"), ov_sp(21, 30, "email")))))
+T("disjoint spans still get their own tags",
+  identical(se_redact_freetext_spans(ov_txt, rbind(ov_sp(10, 12, "name"), ov_sp(20, 30, "nric"))),
+            paste0(strrep(".", 9), "[NAME]", "4567890", "[NRIC]", strrep(".", 10))))
+pc_txt <- "addr Singapore 520123 end"
+T("postal still masked when the union IS the postal span (nested bare 6-digit)",
+  identical(se_redact_freetext_spans(pc_txt, rbind(ov_sp(6, 21, "postal"), ov_sp(16, 21, "postal", 0.6))),
+            "addr Singapore 520XXX end"))
+pp_txt <- "addr Singapore 52012391234567 end"
+pp <- se_redact_freetext_spans(pp_txt, rbind(ov_sp(6, 21, "postal"), ov_sp(19, 29, "phone")))
+T("postal NOT masked when the union extends past it (tag instead, no digits left)",
+  identical(pp, "addr [POSTAL] end") && !grepl("[0-9]", pp))
+set.seed(11)
+T("merge_overlaps: output disjoint, non-touching, covers every input position", all(vapply(1:200, function(i) {
+  n <- sample(1:6, 1); s <- sample(1:40, n, TRUE); e <- s + sample(0:8, n, TRUE)
+  m <- se_merge_overlaps(data.frame(start = s, end = e, type = "name", confidence = runif(n)))
+  cov_in  <- unique(unlist(Map(seq, s, e)))
+  cov_out <- unlist(Map(seq, m$start, m$end))
+  o <- order(m$start)
+  setequal(cov_in, cov_out) && !anyDuplicated(cov_out) &&
+    all(m$start[o][-1] > m$end[o][-nrow(m)] + 1L)
+}, logical(1))))
+
 sec("DATE-SHIFT (interval-preserving + reversible)")
 dts <- c("01/01/2020","15/01/2020","01/01/2020")
 sh <- se_shift_date(dts, key, salt="visit", subject_id=c("P1","P1","P2"))

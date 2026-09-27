@@ -222,7 +222,7 @@ se_xml_scrub <- function(input, key = NULL, profile = NULL, sweep = TRUE,
       before <- xml2::xml_text(nd)
       spans <- se_scan_text(before, detectors = sweep_dets)
       if (!nrow(spans)) next
-      spans <- se_dedup_overlaps(spans)
+      spans <- se_merge_overlaps(spans)  # union: no partial-overlap leak
       after <- before
       # apply right-to-left so earlier offsets stay valid
       ord <- order(spans$start, decreasing = TRUE)
@@ -230,7 +230,8 @@ se_xml_scrub <- function(input, key = NULL, profile = NULL, sweep = TRUE,
         s <- spans$start[i]; e <- spans$end[i]
         matched <- substr(after, s, e)
         # postal codes are masked (keep sector, drop last 3); others redacted
-        repl <- if (identical(spans$type[i], "postal")) se_mask_postal(matched)
+        repl <- if (identical(spans$type[i], "postal") && spans$exact[i])
+                  se_mask_postal(matched)
                 else "[REDACTED]"
         after <- paste0(substr(after, 1, s - 1L), repl,
                         substr(after, e + 1L, nchar(after)))

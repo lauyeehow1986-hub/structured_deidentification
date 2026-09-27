@@ -151,14 +151,16 @@ se_redact_freetext_value <- function(text, detectors = se_detectors(),
   sp <- se_scan_text(text, detectors)
   sp <- sp[sp$confidence >= min_conf, , drop = FALSE]
   if (!nrow(sp)) return(text)
-  sp <- se_dedup_overlaps(sp)
+  # union, not dedup: a partial overlap must not leave either span's tail in clear
+  sp <- se_merge_overlaps(sp)
   # apply from rightmost span to leftmost so offsets stay valid
   sp <- sp[order(-sp$start), , drop = FALSE]
   out <- text
   for (i in seq_len(nrow(sp))) {
     matched <- substr(out, sp$start[i], sp$end[i])
-    # postal codes are masked (keep sector, drop last 3) rather than dropped whole
-    repl <- if (identical(sp$type[i], "postal")) se_mask_postal(matched)
+    # postal codes are masked (keep sector, drop last 3) rather than dropped
+    # whole -- only when the merged span is exactly that postal span
+    repl <- if (identical(sp$type[i], "postal") && sp$exact[i]) se_mask_postal(matched)
             else paste0("[", toupper(sp$type[i]), "]")
     out <- paste0(substr(out, 1, sp$start[i] - 1L), repl,
                   substr(out, sp$end[i] + 1L, nchar(out)))
@@ -174,10 +176,10 @@ se_redact_freetext_value <- function(text, detectors = se_detectors(),
 se_redact_freetext_spans <- function(text, spans) {
   if (is.na(text) || !nzchar(text)) return(text)
   if (is.null(spans) || !nrow(spans)) return(text)
-  # se_dedup_overlaps ranks by (width, confidence); supply a default so a
-  # caller may pass a minimal start/end/type span set (no confidence column).
-  if (is.null(spans$confidence)) spans$confidence <- 1
-  spans <- se_dedup_overlaps(spans)
+  # Merge overlapping/touching spans into their union (tag of the widest, then
+  # highest-confidence, member) so a partial overlap cannot leak the tail of
+  # the narrower span. A minimal start/end/type span set (no confidence) is ok.
+  spans <- se_merge_overlaps(spans)
   spans <- spans[order(-spans$start), , drop = FALSE]
   out <- text
   for (i in seq_len(nrow(spans))) {
@@ -191,7 +193,8 @@ se_redact_freetext_spans <- function(text, spans) {
       if (e < s) next
       matched <- substr(out, s, e)
     }
-    repl <- if (identical(spans$type[i], "postal")) se_mask_postal(matched)
+    repl <- if (identical(spans$type[i], "postal") && spans$exact[i])
+              se_mask_postal(matched)
             else paste0("[", toupper(spans$type[i]), "]")
     out <- paste0(substr(out, 1, s - 1L), repl, substr(out, e + 1L, nchar(out)))
   }

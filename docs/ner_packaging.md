@@ -315,6 +315,24 @@ judge), so with parallel workers keep `workers x 2.3 GB` within the machine's
 memory. A failed export is shown in the app and audited as `deidentify_failed`;
 in batch mode the file is marked `error` and no output is written for it.
 
+**Status (slm_jev P25, 2026-10-05).** slm_jev has not yet passed its own release
+gate (direct-identifier recall ≥ 0.98, precision ≥ 0.90, ECE ≤ 0.05, pooled over
+three blind synthetic sets by writers who never saw the system). Treat it as an
+evaluated, opt-in second opinion, not a certified detector. Its last two pooled
+blind runs (96 notes each, release configuration):
+
+| slm_jev round | direct recall | precision | ECE | F1 | Privacy Filter F1 |
+|---|---|---|---|---|---|
+| P24, notes_v22–v24 | 0.977 | 0.951 | 0.021 | 0.963 | 0.83–0.87 |
+| P25, notes_v25–v27 | 0.984 | 0.879 | 0.064 | 0.929 | 0.77–0.88 |
+
+Each round failed a different check by a few spans. P25's *token sweep*, which
+proposes rare capitalised words, raised recall but was badly calibrated. It is
+off unless `SLMJEV_TOKEN_SWEEP=1`. Use the P5 judge with the
+calibration fitted for it (slm_jev `models/calibration_p22.json`). Results on
+synthetic text do not establish performance on real records. Validate on a
+governed local sample before relying on it, and keep the reviewer step.
+
 ---
 
 ## Behaviour when the engines are absent

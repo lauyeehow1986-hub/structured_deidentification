@@ -131,16 +131,16 @@ ui <- page_navbar(
         # (name, address, secret). ALL selected by default so nothing is silently
         # left un-redacted; UNCHECK a type to stop redacting it.
         checkboxGroupInput("ft_types", "Redact these free-text types",
-          choices = c("name","address","email","phone","date","postal",
-                      "nric","passport","mrn","ip","url","account","secret"),
-          selected = c("name","address","email","phone","date","postal",
-                       "nric","passport","mrn","ip","url","account","secret"),
-          inline = TRUE),
+          choices = .se_ft_types, selected = .se_ft_types, inline = TRUE),
         tags$details(tags$summary("Advanced / optional backends"),
           checkboxInput("use_ner",
             "Use Presidio/spaCy NER (needs the separately-bundled model)", value = FALSE),
           checkboxInput("use_llm",
-            "Use a local LLM (llama.cpp / Ollama) — off by default", value = FALSE))),
+            "Use a local LLM (llama.cpp / Ollama) — off by default", value = FALSE),
+          checkboxInput("use_jev",
+            paste("Use slm:jev (calibrated local judge; unsure spans are flagged",
+                  "needs_review and redacted unless rejected) — off by default"),
+            value = FALSE))),
       div(class="small text-muted mt-1",
           "Rules + validators (NRIC checksum, phone, email, dates) and column ",
           "profiling always run with zero Python. Offline NER and the local LLM ",
@@ -457,15 +457,21 @@ server <- function(input, output, session) {
       # free-text findings on likely note columns: rules always, NER/LLM opt-in
       ff <- se_detect_freetext(rv$df,
               use_pf = isTRUE(input$use_pf),
-              use_ner = isTRUE(input$use_ner), use_llm = isTRUE(input$use_llm))
+              use_ner = isTRUE(input$use_ner), use_llm = isTRUE(input$use_llm),
+              use_jev = isTRUE(input$use_jev))
       rv$findings <- if (nrow(ff)) ff else NULL
+      if (!is.null(attr(ff, "jev_error")))
+        showNotification(paste("slm:jev scan FAILED; its findings are missing:",
+                               paste(attr(ff, "jev_error"), collapse = "; ")),
+                         type = "error", duration = NULL)
     })
     if (!is.null(rv$proj))
       se_audit_append(se_project_paths(rv$proj$dir)$audit, "detect", input$actor,
                       list(outliers = nrow(rv$profile$outliers),
                            freetext = if (is.null(rv$findings)) 0L else nrow(rv$findings),
                            pf = isTRUE(input$use_pf),
-                           ner = isTRUE(input$use_ner), llm = isTRUE(input$use_llm)))
+                           ner = isTRUE(input$use_ner), llm = isTRUE(input$use_llm),
+                           jev = isTRUE(input$use_jev)))
   })
 
   output$outliers <- renderDT({
@@ -546,6 +552,7 @@ server <- function(input, output, session) {
     }
     types_sel <- input$ft_types %||% NULL
     freetext_opts <- list(use_pf = isTRUE(input$use_pf),
+                          use_jev = isTRUE(input$use_jev),
                           min_conf = as.numeric(input$ft_min_conf %||% 0.5),
                           types = types_sel,
                           rejects = rv$ft_rejects %||% character(0))
@@ -582,14 +589,24 @@ server <- function(input, output, session) {
     par_arg <- if (isTRUE(input$parallel)) max(1L, as.integer(input$workers %||% 2L)) else FALSE
 
     withProgress(message = "De-identifying...", value = 0, {
-      res <- se_deidentify_file(
+      # a detector that must not be skipped (slm:jev) stops the run: say so, audit
+      # it, and write nothing, instead of ending the session
+      res <- tryCatch(se_deidentify_file(
         rv$proj, src, policy, key, out_format = input$out_format,
         chunk_size = as.integer(input$chunk_size %||% 50000L),
         parallel = par_arg,
         app_r_dir = getOption("se.app_r_dir"),
         progress_cb = function(done, total)
           setProgress(value = if (total > 0) done / total else 1,
-                      detail = sprintf("chunk %d / %d", done, total)))
+                      detail = sprintf("chunk %d / %d", done, total))),
+        error = function(e) {
+          showNotification(paste("De-identification stopped; nothing was exported:",
+                                 conditionMessage(e)), type = "error", duration = NULL)
+          se_audit_append(p$audit, "deidentify_failed", input$actor,
+                          list(error = substr(conditionMessage(e), 1, 300)))
+          NULL
+        })
+      req(res)
       # Make Review + SDC memory-safe: only hold the whole output in memory when
       # it is small; otherwise page (Review) / sample (SDC) it from disk via
       # readers, so a huge finished output is never loaded in full.

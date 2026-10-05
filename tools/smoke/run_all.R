@@ -4,7 +4,8 @@
 if (!file.exists("app/global.R")) stop("Run from the repo root (where app/ lives).")
 rscript <- file.path(R.home("bin"),
                      if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
-scripts <- c("smoke1_core.R", "smoke2_sdc_docs.R", "smoke3_pipeline.R", "smoke4_pf.R")
+scripts <- c("smoke1_core.R", "smoke2_sdc_docs.R", "smoke3_pipeline.R", "smoke4_pf.R",
+             "smoke5_jev.R")
 fails <- 0L
 for (s in scripts) {
   cat("\n##########  ", s, "  ##########\n", sep = "")

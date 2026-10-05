@@ -262,6 +262,79 @@ for a human, never as ground truth.
 
 ---
 
+## 3. Optional: slm:jev (calibrated local judge)
+
+[slm_jev](https://github.com/lauyeehow1986-hub/slm_jev) is a separate offline
+detector: rules and a shape proposer suggest candidate spans, and a small local
+GGUF model answers typed questions about each one ("which identifier is this, if
+any?"). Probabilities are read from option-token logprobs and calibrated on
+synthetic data. It never generates replacement text. It is **off by default**:
+tick *Use slm:jev* in *Advanced*, or pass `--jev` to `batch_cli.R`.
+
+It **fails closed**, unlike the other engines:
+
+- An unsure span comes back with `needs_review = TRUE`. It passes the confidence
+  floor and is redacted unless a reviewer rejects it.
+- A scan that fails (missing checkout, model or calibration, or a crash) raises a
+  notification in the UI and stops the export. It is never read as "no PII".
+
+Paths are discovered passively (file existence only):
+
+| setting | option / environment variable | default |
+|---|---|---|
+| checkout | `se.slmjev_root` / `SLMJEV_ROOT` | `<bundle>/slmjev` |
+| llama-server | `se.slmjev_llama_server` / `SLMJEV_LLAMA_SERVER` | `<bundle>/bin/llama/llama-server.exe` |
+| model | `se.slmjev_model` / `SLMJEV_JUDGE_MODEL` | `<root>/models/judge.gguf` |
+| calibration | `se.slmjev_calibration` / `SLMJEV_CALIBRATION` | `<root>/models/calibration.json` |
+
+The calibration file must be fitted for that model. slm_jev forbids every
+non-loopback socket itself and talks only to the llama-server it starts on
+`127.0.0.1` with a per-run key, so the `jev` runner mode does not call
+`_forbid_network()`. The runner imports slm_jev from the checkout into the
+bundled interpreter; slm_jev needs only the standard library at run time.
+
+slm:jev also judges other engines' spans. Every Privacy Filter span and every
+Presidio `person` span (once *Enable offline NER* has probed Presidio) goes to
+it as an extra candidate (`se_jev_candidates()`). This is slm_jev's release
+configuration (`jev+pf+ner.person`, its decision 0009). The judge decides on
+each span like one of its own proposals, so an engine span is never accepted
+just because an engine found it. Privacy Filter runs for slm:jev even when its
+own box is unticked; its spans are then judged but not shown on their own.
+The export passes the same candidates as detection.
+
+Its identifiers map onto the free-text types: `national_id` → `nric`,
+`case_visit` → `case`, `device` → `serial`, `other_id` → `other`, and every SHI
+category (HIV/STI, mental health, ...) → `sensitive`. `tools/smoke/smoke5_jev.R`
+tests the R side on canned output and scans live when slm_jev is available.
+
+Cost: slm:jev runs once at detection and again at export (like Privacy Filter).
+On a 16 GB CPU laptop it measured about 60 s per 1k characters (p50) on synthetic
+notes, so use it on free-text columns of modest size, not bulk exports. Each
+process starts its own llama-server (about 2.3 GB RAM with the 1.7B Q4_K_M
+judge), so with parallel workers keep `workers x 2.3 GB` within the machine's
+memory. A failed export is shown in the app and audited as `deidentify_failed`;
+in batch mode the file is marked `error` and no output is written for it.
+
+**Status (slm_jev P25, 2026-10-05).** slm_jev has not yet passed its own release
+gate (direct-identifier recall ≥ 0.98, precision ≥ 0.90, ECE ≤ 0.05, pooled over
+three blind synthetic sets by writers who never saw the system). Treat it as an
+evaluated, opt-in second opinion, not a certified detector. Its last two pooled
+blind runs (96 notes each, release configuration):
+
+| slm_jev round | direct recall | precision | ECE | F1 | Privacy Filter F1 |
+|---|---|---|---|---|---|
+| P24, notes_v22–v24 | 0.977 | 0.951 | 0.021 | 0.963 | 0.83–0.87 |
+| P25, notes_v25–v27 | 0.984 | 0.879 | 0.064 | 0.929 | 0.77–0.88 |
+
+Each round failed a different check by a few spans. P25's *token sweep*, which
+proposes rare capitalised words, raised recall but was badly calibrated. It is
+off unless `SLMJEV_TOKEN_SWEEP=1`. Use the P5 judge with the
+calibration fitted for it (slm_jev `models/calibration_p22.json`). Results on
+synthetic text do not establish performance on real records. Validate on a
+governed local sample before relying on it, and keep the reviewer step.
+
+---
+
 ## Behaviour when the engines are absent
 
 - No bundled interpreter → **Enable offline NER** reports "rules-only mode" and

@@ -119,6 +119,14 @@ def _parse_spans(content: str):
     in_str = False
     esc = False
     for idx, ch in enumerate(text):
+        if in_str and ch == "\n":
+            # A JSON string never holds a raw newline. llama-cli echoes a long prompt
+            # cut off ("... (truncated)"), which leaves a quote open; without this
+            # reset every real span object after the echo was read as string content
+            # and the whole note returned zero spans (fail-open).
+            in_str = esc = False
+            depth, start = 0, -1
+            continue
         if in_str:
             if esc:
                 esc = False
